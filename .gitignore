@@ -1,0 +1,43 @@
+# Bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Secrets & sensitive — 真实配置文件（任何位置均排除）
+.env
+*.token
+*.key
+.secrets/
+**/config.json
+**/config.yml
+**/config.yaml
+!**/*.example*
+!config.example.json
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+log/
+
+# Internal dev docs — 本地开发文档，不发布
+docs/dev/
+
+# Code workspace
+*.code-workspace

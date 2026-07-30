@@ -1,0 +1,13 @@
+{
+  "_comment": "SmartBW MCP 配置文件。复制为 ~/.config/bitwarden-mcp/config.json 并填入真实值。",
+  "_security": "master_password 会被自动加密为 !enc:v1:... 格式（HKDF-SHA256 + Fernet）。加密绑定本机 hostname+machine-id，不可跨机器复制。",
+  "_env_override": "所有字段均可通过同名大写环境变量覆盖（如 BW_HOST=...）。环境变量优先级高于本文件。",
+
+  "bw_host": "",
+  "email": "",
+  "master_password": "",
+  "client_id": "",
+  "client_secret": "",
+  "mcp_server_path": "",
+  "connection_timeout_seconds": 15
+}

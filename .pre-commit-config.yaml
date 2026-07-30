@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: forbid-real-config
+        name: 检查真实配置文件泄露
+        entry: bash scripts/pre-commit.sh
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false

@@ -1,0 +1,16 @@
+[Unit]
+Description=SmartBW MCP Daemon - Vaultwarden 代理守护进程
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.agents/skills/smartbw-mcp/mcp_daemon.py
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/.smartbw-mcp/daemon.log
+StandardError=append:%h/.smartbw-mcp/daemon.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
