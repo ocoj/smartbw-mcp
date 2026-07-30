@@ -46,7 +46,7 @@ def _derive_key() -> bytes:
     """HKDF-SHA256 从机器指纹派生 32 字节 Fernet key"""
     hostname = socket.gethostname()
     machine_id = _get_machine_id()
-    ikm = f"{hostname}:{machine_id}:smartbw-config-v1".encode()
+    ikm = f"{hostname}:{machine_id}:smartbw-config-v2".encode()
 
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
