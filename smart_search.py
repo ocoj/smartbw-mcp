@@ -109,6 +109,8 @@ class SmartBitwardenMCP:
         if (self._items_cache is None or
             current_time - self._cache_time > self._cache_ttl):
             try:
+                # 缓存过期：先 sync 确保 node MCP server 拿到最新数据
+                self.client.call_tool("sync", {})
                 self._items_cache = self.client.list_items(type="items")
                 self._cache_time = current_time
                 logger.info(f"缓存更新,项目数: {len(self._items_cache)}")
@@ -221,6 +223,8 @@ class SmartBitwardenMCP:
         if (self._items_cache is None or
             current_time - self._cache_time > self._cache_ttl):
             try:
+                # 缓存过期：先 sync 确保 node MCP server 拿到最新数据
+                self.client.call_tool("sync", {})
                 self._items_cache = self.client.list_items(type="items")
                 self._cache_time = current_time
                 self._index_dirty = True
