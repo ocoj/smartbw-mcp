@@ -14,6 +14,7 @@ MCP Server 名是 `smartbw`（不是 `smartbw-mcp`）。工具名前缀取决于
 | 框架 | 工具名示例 | 配置方式 |
 |------|-----------|----------|
 | 通用 | `smartbw__<工具名>` | 在工具列表中搜索 `smartbw` 确认 |
+| VS Code | `mcp__smartbw__<工具名>` | 详见 `docs/integrations/vscode.md`（含安装踩坑记录） |
 | Deep Code | `mcp__smartbw__<工具名>` | 详见 `docs/integrations/deepcode.md` |
 | OpenClaw | `smartbw__<工具名>` | 详见 `docs/integrations/openclaw.md` |
 

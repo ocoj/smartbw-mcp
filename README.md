@@ -140,6 +140,7 @@ python3 mcp_daemon.py
 | [docs/dependencies.md](docs/dependencies.md) | 依赖与版本要求 |
 | [docs/integrations/deepcode.md](docs/integrations/deepcode.md) | Deep Code 集成 |
 | [docs/integrations/openclaw.md](docs/integrations/openclaw.md) | OpenClaw 集成 |
+| [docs/integrations/vscode.md](docs/integrations/vscode.md) | VS Code 集成（含安装踩坑记录） |
 | [reference/troubleshooting.md](reference/troubleshooting.md) | 故障排查 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 
