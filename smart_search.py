@@ -7,6 +7,7 @@
 - 单例工厂函数(get_smart_mcp, get_password_smart)
 - CLI 入口(main)
 """
+
 import difflib
 import sys
 import threading
@@ -33,6 +34,7 @@ from models import (
 # ============================================================================
 # 智能搜索辅助函数
 # ============================================================================
+
 
 def _normalize(s: Optional[str]) -> str:
     if s is None:
@@ -73,11 +75,13 @@ def _fetch_items(client) -> List[Dict]:
 # 智能 Bitwarden MCP 客户端
 # ============================================================================
 
+
 class SmartBitwardenMCP:
     """智能 Bitwarden MCP 客户端"""
 
-    def __init__(self, auto_init: bool = True,
-                 timeout: int = DEFAULT_TIMEOUT, use_daemon: bool = True):
+    def __init__(
+        self, auto_init: bool = True, timeout: int = DEFAULT_TIMEOUT, use_daemon: bool = True
+    ):
         self.client = RealMCPClient(timeout, use_daemon=use_daemon)
 
         # 长驻缓存：TTL 见 config.CACHE_TTL（默认 15s）。
@@ -128,8 +132,10 @@ class SmartBitwardenMCP:
 
     def refresh_stats(self) -> str:
         """O6：缓存命中/重建统计，供日志与 smartbw_sync_cache 展示"""
-        return (f"命中={self._stat_hits} 同步重建={self._stat_rebuilds} "
-                f"异步预热={self._stat_bg_refresh} 强制刷新={self._stat_force_refresh}")
+        return (
+            f"命中={self._stat_hits} 同步重建={self._stat_rebuilds} "
+            f"异步预热={self._stat_bg_refresh} 强制刷新={self._stat_force_refresh}"
+        )
 
     def _cache_age(self) -> float:
         return (time.time() - self._cache_time) if self._cache_time else float("inf")
@@ -159,7 +165,7 @@ class SmartBitwardenMCP:
         index: Dict[str, List[Dict]] = {}
         for item in items:
             index.setdefault(_normalize(item.get("name", "")), []).append(item)
-        self._snapshot = (items, index)   # 原子：单次属性绑定
+        self._snapshot = (items, index)  # 原子：单次属性绑定
         self._items_cache = items
         self._name_index = index
         self._cache_time = time.time()
@@ -207,8 +213,10 @@ class SmartBitwardenMCP:
                 self._stat_force_refresh += 1
             else:
                 self._stat_rebuilds += 1
-            logger.info(f"[cache] 装载完成: {len(items)} 条, 耗时 {time.time() - t0:.2f}s"
-                        f" | {self.refresh_stats()}")
+            logger.info(
+                f"[cache] 装载完成: {len(items)} 条, 耗时 {time.time() - t0:.2f}s"
+                f" | {self.refresh_stats()}"
+            )
             return self._items_cache or []
 
     def _maybe_background_refresh(self) -> None:
@@ -235,8 +243,10 @@ class SmartBitwardenMCP:
                     return
                 self._install_items(items)
                 self._stat_bg_refresh += 1
-                logger.info(f"[cache] 异步刷新完成: {len(items)} 条, 耗时 {time.time() - t0:.2f}s"
-                            f" | {self.refresh_stats()}")
+                logger.info(
+                    f"[cache] 异步刷新完成: {len(items)} 条, 耗时 {time.time() - t0:.2f}s"
+                    f" | {self.refresh_stats()}"
+                )
         finally:
             with self._refresh_lock:
                 self._refresh_inflight = False
@@ -271,18 +281,27 @@ class SmartBitwardenMCP:
         items_dict = self._ensure_items()
         items = []
         for item_dict in items_dict:
-            items.append(BwItem(
-                id=item_dict.get("id", ""),
-                name=item_dict.get("name", ""),
-                username=item_dict.get("login", {}).get("username", ""),
-                password="",  # 不预加载密码
-                uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])],
-                notes=item_dict.get("notes", "")
-            ))
+            items.append(
+                BwItem(
+                    id=item_dict.get("id", ""),
+                    name=item_dict.get("name", ""),
+                    username=item_dict.get("login", {}).get("username", ""),
+                    password="",  # 不预加载密码
+                    uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])],
+                    notes=item_dict.get("notes", ""),
+                )
+            )
         return items
 
-    def update_item(self, item_id: str, name: Optional[str] = None, username: Optional[str] = None,
-                    password: Optional[str] = None, uri: Optional[str] = None, notes: Optional[str] = None) -> bool:
+    def update_item(
+        self,
+        item_id: str,
+        name: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        uri: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
         """更新项目,返回是否成功"""
         try:
             return self.client.update_item(item_id, name, username, password, uri, notes)
@@ -324,7 +343,9 @@ class SmartBitwardenMCP:
             logger.error("get_item_by_id 锁定失败")
             return None
 
-    def search_items(self, query: str, max_results: int = 10, retry_on_empty: bool = True) -> List[SearchResult]:
+    def search_items(
+        self, query: str, max_results: int = 10, retry_on_empty: bool = True
+    ) -> List[SearchResult]:
         """
         搜索项目(支持自定义字段,返回更多结果)
 
@@ -352,8 +373,10 @@ class SmartBitwardenMCP:
 
         if need_refresh:
             if not self._should_force_refresh():
-                logger.info(f"搜索 '{query}' {reason}，但距上次装载不足 "
-                            f"{CACHE_REFRESH_MIN_AGE}s，跳过刷新")
+                logger.info(
+                    f"搜索 '{query}' {reason}，但距上次装载不足 "
+                    f"{CACHE_REFRESH_MIN_AGE}s，跳过刷新"
+                )
                 return results
             logger.info(f"搜索 '{query}' {reason}，强制刷新缓存后重查...")
             fresh = self._do_fuzzy_search(query, max_results, force_refresh=True)
@@ -367,7 +390,9 @@ class SmartBitwardenMCP:
 
         return results
 
-    def fuzzy_search(self, query: str, max_results: int = 5, retry_on_empty: bool = True) -> List[SearchResult]:
+    def fuzzy_search(
+        self, query: str, max_results: int = 5, retry_on_empty: bool = True
+    ) -> List[SearchResult]:
         """
         模糊搜索(支持自定义字段)
 
@@ -379,18 +404,23 @@ class SmartBitwardenMCP:
         logger.info(f"模糊搜索: '{query}'")
         return self.search_items(query, max_results, retry_on_empty)
 
-    def _do_fuzzy_search(self, query: str, max_results: int = 5,
-                         force_refresh: bool = False) -> List[SearchResult]:
+    def _do_fuzzy_search(
+        self, query: str, max_results: int = 5, force_refresh: bool = False
+    ) -> List[SearchResult]:
         """执行实际的模糊搜索（内部方法，带索引加速）
 
         force_refresh=True 时阻塞重建缓存，用于"无结果 / 结果可疑"的重查。
         """
-        if not self._ensure_items(force=force_refresh):
-            return []
+        # 确保缓存已装载（冷启动 / TTL 过期 / force 时同步刷新）。
+        # 刻意不使用其返回值：空判定与取值统一走下方的原子快照，避免"判定用一代、
+        # 取值用另一代"（R-3.5）。语义等价——无数据时二者同时为空。
+        self._ensure_items(force=force_refresh)
 
         # 快速路径：索引精确/前缀匹配（索引随缓存一同构建）
         # 原子读取 (items, index)，避免与后台刷新交错时读到撕裂快照
         items, name_index = self._snapshot_items()
+        if not items:
+            return []
         norm_q = _normalize(query)
         exact_matches = name_index.get(norm_q, [])
         prefix_matches = []
@@ -403,18 +433,22 @@ class SmartBitwardenMCP:
         if len(indexed_items) >= max_results:
             results = []
             for item_dict in indexed_items[:max_results]:
-                results.append(SearchResult(
-                    item=BwItem(
-                        id=item_dict.get("id", ""),
-                        name=item_dict.get("name", ""),
-                        username=item_dict.get("login", {}).get("username", ""),
-                        password="",
-                        uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])],
-                        notes=item_dict.get("notes", "")
-                    ),
-                    score=1.0,
-                    matched_field="name"
-                ))
+                results.append(
+                    SearchResult(
+                        item=BwItem(
+                            id=item_dict.get("id", ""),
+                            name=item_dict.get("name", ""),
+                            username=item_dict.get("login", {}).get("username", ""),
+                            password="",
+                            uris=[
+                                u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])
+                            ],
+                            notes=item_dict.get("notes", ""),
+                        ),
+                        score=1.0,
+                        matched_field="name",
+                    )
+                )
             logger.info(f"索引快速命中: {len(results)} 结果")
             return results
 
@@ -457,28 +491,28 @@ class SmartBitwardenMCP:
                     id=item_dict.get("id", ""),
                     name=name,
                     username=username,
-                    uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])]
+                    uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])],
                 )
 
-                scored.append(SearchResult(
-                    item=bw_item,
-                    score=best_score,
-                    matched_field=matched_field
-                ))
+                scored.append(
+                    SearchResult(item=bw_item, score=best_score, matched_field=matched_field)
+                )
 
         # 将索引命中项也转为 SearchResult
         indexed_results = []
         for item_dict in indexed_items:
-            indexed_results.append(SearchResult(
-                item=BwItem(
-                    id=item_dict.get("id", ""),
-                    name=item_dict.get("name", ""),
-                    username=item_dict.get("login", {}).get("username", ""),
-                    uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])]
-                ),
-                score=1.0,
-                matched_field="name"
-            ))
+            indexed_results.append(
+                SearchResult(
+                    item=BwItem(
+                        id=item_dict.get("id", ""),
+                        name=item_dict.get("name", ""),
+                        username=item_dict.get("login", {}).get("username", ""),
+                        uris=[u.get("uri", "") for u in item_dict.get("login", {}).get("uris", [])],
+                    ),
+                    score=1.0,
+                    matched_field="name",
+                )
+            )
 
         # 合并索引命中项 + 模糊评分项，统一按分数排序（一次排够）
         all_results = indexed_results + scored
@@ -638,6 +672,7 @@ def get_password_smart(search_term: str) -> Optional[str]:
 # CLI 接口
 # ============================================================================
 
+
 def main():
     import argparse
 
@@ -647,26 +682,36 @@ def main():
     get_parser = subparsers.add_parser("get", help="智能获取密码")
     get_parser.add_argument("search", help="搜索词")
     get_parser.add_argument("--session", help="BW_SESSION token")
-    get_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})")
+    get_parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})"
+    )
 
     search_parser = subparsers.add_parser("search", help="搜索项目")
     search_parser.add_argument("query", help="搜索词")
     search_parser.add_argument("--session", help="BW_SESSION token")
     search_parser.add_argument("--limit", type=int, default=3, help="显示数量")
-    search_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})")
+    search_parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})"
+    )
 
     list_parser = subparsers.add_parser("list", help="列出项目")
     list_parser.add_argument("--session", help="BW_SESSION token")
     list_parser.add_argument("--all", action="store_true", help="列出所有")
-    list_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})")
+    list_parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})"
+    )
 
     test_parser = subparsers.add_parser("test", help="测试连接")
     test_parser.add_argument("--session", help="BW_SESSION token")
-    test_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})")
+    test_parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})"
+    )
 
     ping_parser = subparsers.add_parser("ping", help="健康检查")
     ping_parser.add_argument("--session", help="BW_SESSION token")
-    ping_parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})")
+    ping_parser.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"超时时间(秒,默认{DEFAULT_TIMEOUT})"
+    )
 
     args = parser.parse_args()
 
@@ -674,7 +719,7 @@ def main():
         parser.print_help()
         return
 
-    timeout = getattr(args, 'timeout', DEFAULT_TIMEOUT)
+    timeout = getattr(args, "timeout", DEFAULT_TIMEOUT)
     client = SmartBitwardenMCP(timeout=timeout)
 
     try:
