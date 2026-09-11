@@ -7,18 +7,31 @@
 - Session token 解析和获取
 - bw CLI 进程管理
 """
+import json
 import os
 import re
-import json
 import subprocess
-import logging
 from typing import Optional
 
-from config import AUTO_UNLOCK, CLI_STATUS_TIMEOUT, CLI_LOGIN_TIMEOUT, CLI_UNLOCK_TIMEOUT, get_config, logger
+from config import (
+    AUTO_UNLOCK,
+    CLI_LOGIN_TIMEOUT,
+    CLI_STATUS_TIMEOUT,
+    CLI_UNLOCK_TIMEOUT,
+    get_config,
+    logger,
+)
 
 # ============================================================================
 # 自动解锁
 # ============================================================================
+
+
+def _mask(value: str, keep: int = 2) -> str:
+    """日志中遮蔽账号/标识：只保留前 keep 个字符，其余以 *** 代替。"""
+    if not value:
+        return "(空)"
+    return value[:keep] + "***"
 
 
 def auto_unlock() -> Optional[str]:
@@ -98,11 +111,14 @@ def _is_unlocked(env: dict) -> bool:
             return st in ("unlocked", "locked")
         except (json.JSONDecodeError, ValueError):
             pass
-        # 回退字符串匹配（兼容非标准输出）
+        # 回退字符串匹配（兼容非标准输出）：白名单语义 ——
+        # 只有明确出现 unlocked/locked 才认为"已登录"；其余（含空输出、错误信息）一律按
+        # 未登录处理，避免 bw 输出异常时被误判为已登录而跳过 login 流程。
         output = check_proc.stdout.lower()
-        if "not logged in" in output or '"loggedin": false' in output:
-            return False
-        return True
+        if "unlocked" in output or "locked" in output:
+            return True
+        logger.warning("bw status 输出无法识别，按未登录处理: %r", check_proc.stdout[:200])
+        return False
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         logger.debug(f"bw status 检查失败: {e}")
         return False
@@ -117,7 +133,7 @@ def _try_api_key_login(env: dict) -> bool:
     login_env = env.copy()
     login_env["BW_CLIENTID"] = client_id
     login_env["BW_CLIENTSECRET"] = client_secret
-    logger.info(f"使用 API Key 登录 (client_id: {client_id[:12]}...)")
+    logger.info("使用 API Key 登录 (client_id: %s)", _mask(client_id))
 
     try:
         login_proc = subprocess.run(
@@ -146,7 +162,7 @@ def _try_password_login(env: dict) -> bool:
         logger.warning("未配置 BW_MASTER_PASSWORD，无法登录")
         return False
 
-    logger.info(f"尝试用户名密码登录 {email[:12]}...")
+    logger.info("尝试用户名密码登录 %s", _mask(email))
     try:
         # v2.0.1: 传入 env (含 BW_HOST) + 使用 --passwordenv 传递密码
         # 修复两个 bug: 1) env 漏传导致 BW_HOST 不生效 2) stdin 密码不可靠

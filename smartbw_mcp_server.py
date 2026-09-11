@@ -27,15 +27,23 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-logging.basicConfig(level=logging.WARNING, stream=sys.stderr, format='%(levelname)s [smartbw-mcp] %(message)s')
+# 日志一律写 stderr —— stdout 是 JSON-RPC 协议流，绝不能污染。
+# 级别受 LOG_LEVEL 控制（默认 INFO，与 config.setup_logging 保持一致），
+# 这样 CHANGELOG 宣传的 [cache]/[prewarm] 可观测性日志才真正可见。
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    stream=sys.stderr,
+    format='%(levelname)s [smartbw-mcp] %(message)s',
+)
 logger = logging.getLogger("smartbw_mcp_server")
 
 # 优雅退出信号文件 — 部署脚本 touch 此文件后，MCP server 处理完下一个请求即退出
 SHUTDOWN_SIGNAL = Path.home() / ".smartbw-mcp" / "restart.signal"
 
-# 提前导入（避免每次请求重复 import）
-from config import get_config
-from smart_search import SmartBitwardenMCP
+# 提前导入（避免每次请求重复 import）。
+# noqa: E402 —— 必须在 sys.path.insert 之后导入，属有意为之。
+from config import get_config  # noqa: E402
+from smart_search import SmartBitwardenMCP  # noqa: E402
 
 # === 工具定义 ===
 
@@ -103,10 +111,12 @@ TOOLS = [
     },
     {
         "name": "smartbw_list_all",
-        "description": "列出 Vaultwarden 中的所有项目名称和用户名。用于浏览。",
+        "description": "列出 Vaultwarden 中的项目名称和用户名。默认最多返回 50 条，可用 limit 调整（硬上限 200）。",
         "inputSchema": {
             "type": "object",
-            "properties": {}
+            "properties": {
+                "limit": {"type": "integer", "description": "最大返回数（默认 50，上限 200）", "default": 50}
+            }
         }
     },
     {
@@ -180,13 +190,15 @@ def _get_client():
         # 根据错误内容判断具体原因
         if "守护进程未运行" in str(e) or "daemon 初始化失败" in str(e):
             raise Exception(
-                f"[分类A·守护进程未运行] smartbw-daemon 守护进程连接失败。\n"
-                f"根因: daemon 进程不存在或正在启动中\n"
-                f"恢复: systemd 会在 10s 内自动重启，请稍后重试\n"
-                f"手动: systemctl --user restart smartbw-daemon"
+                "[分类A·守护进程未运行] smartbw-daemon 守护进程连接失败。\n"
+                "根因: daemon 进程不存在或正在启动中\n"
+                "恢复: systemd 会在 10s 内自动重启，请稍后重试\n"
+                "手动: systemctl --user restart smartbw-daemon"
             )
         elif "session" in err_str or "unlock" in err_str or "locked" in err_str:
-            bw_host = os.environ.get('BW_HOST', '未设置')
+            # 优先环境变量，其次配置文件 —— 只读 env 时若用户把 bw_host 写在
+            # config.json 里，这里会误报"未设置"，排障时反而误导。
+            bw_host = os.environ.get("BW_HOST") or get_config().get("bw_host") or "未设置"
             raise Exception(
                 f"[分类C·凭证问题] 守护进程无法解锁 Vaultwarden 金库。\n"
                 f"根因: 主密码缺失/错误 或 Vaultwarden 服务器不可达\n"
@@ -198,10 +210,10 @@ def _get_client():
             )
         elif "timeout" in err_str or "超时" in err_str:
             raise Exception(
-                f"[分类B·服务超时] Vaultwarden 服务器响应超时，守护进程正在自动重试。\n"
-                f"根因: Vaultwarden 服务暂时不可达或网络延迟\n"
-                f"恢复: daemon 会自动重试（每 10s 一次，最多 5 次），通常 50s 内恢复\n"
-                f"排查: tail -30 ~/.smartbw-mcp/daemon.log 查看解锁进度"
+                "[分类B·服务超时] Vaultwarden 服务器响应超时，守护进程正在自动重试。\n"
+                "根因: Vaultwarden 服务暂时不可达或网络延迟\n"
+                "恢复: daemon 会自动重试（每 10s 一次，最多 5 次），通常 50s 内恢复\n"
+                "排查: tail -30 ~/.smartbw-mcp/daemon.log 查看解锁进度"
             )
         else:
             raise Exception(
@@ -236,7 +248,7 @@ def _handle_init(_id, _params):
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.1"}
+        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.2"}
     }
 
 
@@ -436,7 +448,7 @@ def _handle_tools_call(_id, params):
     # ── smartbw_search ──
     elif name == "smartbw_search":
         query = args.get("query", "")
-        limit = min(args.get("limit", 5), 20)
+        limit = _int_arg(args.get("limit"), default=5, lo=1, hi=20)
         if not query:
             return _text_result("❌ 缺少搜索词")
         try:
@@ -455,12 +467,18 @@ def _handle_tools_call(_id, params):
     # ── smartbw_list_all ──
     elif name == "smartbw_list_all":
         try:
+            limit = _int_arg(args.get("limit"), default=50, lo=1, hi=200)
             with _get_client_ctx() as smart:
                 items = smart.list_all_items()
                 if not items:
                     return _text_result("无项目")
-                lines = [f"共 {len(items)} 个项目:"]
-                for i, item in enumerate(items):
+                total = len(items)
+                shown = items[:limit]
+                header = f"共 {total} 个项目:"
+                if total > limit:
+                    header += f"（已截断，仅显示前 {limit} 条）"
+                lines = [header]
+                for i, item in enumerate(shown):
                     lines.append(f"  [{i}] {item.name} | user={item.username or '(无)'}")
                 return _text_result("\n".join(lines))
         except Exception as e:
@@ -485,14 +503,20 @@ def _handle_tools_call(_id, params):
         try:
             import random
             import socket
-            import subprocess
 
-            # Step 1: bw sync
-            env = os.environ.copy()
-            env["BW_HOST"] = get_config().get("bw_host", "")
-            r = subprocess.run(["bw", "sync"], env=env, capture_output=True, text=True, timeout=30)
-            sync_ok = r.returncode == 0
-            sync_msg = r.stdout.strip() if sync_ok else r.stderr.strip()
+            # Step 1: 经守护进程执行 sync —— 与缓存刷新（_fetch_items）同源，
+            # 复用 daemon 持有的有效 session，不再旁路直连 bw CLI。
+            # 真机实测：daemon 侧 tools/call sync 返回 "Syncing complete."。
+            sync_ok = True
+            sync_msg = ""
+            try:
+                with _get_client_ctx() as smart:
+                    result = smart.client.call_tool("sync", {})
+                sync_msg = (result if isinstance(result, str) and result.strip()
+                            else "Syncing complete.")
+            except Exception as e:
+                sync_ok = False
+                sync_msg = f"守护进程同步失败: {e}"
 
             # Step 2: restart daemon's node MCP server
             daemon_msg = ""
@@ -536,7 +560,7 @@ def _handle_tools_call(_id, params):
                 cache_msg = f"⚠️ 缓存清除失败: {e}"
 
             lines = [
-                f"bw sync: {'✅ ' + sync_msg if sync_ok else '❌ ' + sync_msg}",
+                f"sync: {'✅ ' + sync_msg if sync_ok else '❌ ' + sync_msg}",
                 daemon_msg,
                 cache_msg,
             ]
@@ -555,6 +579,15 @@ def _text_result(text: str, is_error: bool = False) -> dict:
         "content": [{"type": "text", "text": text}],
         "isError": is_error
     }
+
+
+def _int_arg(value, default: int, lo: int, hi: int) -> int:
+    """把工具参数里的数值安全地夹到 [lo, hi]（非法输入回退 default）。"""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(lo, min(parsed, hi))
 
 
 def _prewarm_cache():

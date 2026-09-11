@@ -45,6 +45,9 @@ if [ -n "$MISSING" ]; then
 fi
 ok "python3 $(python3 --version 2>&1 | awk '{print $2}'), node $(node --version), npm $(npm --version)"
 
+# 解析 python3 的绝对路径，供 systemd 单元使用（不写死 /usr/bin/python3）
+PYTHON_BIN="$(command -v python3)"
+
 # ============================================================
 # Step 2: 安装 npm 依赖
 # ============================================================
@@ -64,7 +67,7 @@ fi
 if python3 -c "import cryptography" 2>/dev/null; then
     ok "Python cryptography 已安装"
 else
-    log "2" "安装 Python cryptography..."
+    log "2b" "安装 Python cryptography..."
     pip3 install cryptography 2>/dev/null || python3 -m pip install cryptography 2>/dev/null || \
         warn "cryptography 安装失败（不影响基本使用，凭据将以明文存储）"
 fi
@@ -94,8 +97,9 @@ else
   "bw_host": "$BW_HOST",
   "email": "$BW_EMAIL",
   "master_password": "$BW_MASTER_PASSWORD",
-  "client_id": "$BW_API_KEY",
+  "client_id": "",
   "client_secret": "",
+  "api_key": "$BW_API_KEY",
   "mcp_server_path": ""
 }
 EOF
@@ -109,6 +113,7 @@ fi
 log "4" "启动守护进程..."
 
 mkdir -p "$DAEMON_DIR"
+chmod 700 "$DAEMON_DIR"   # 运行日志/pid/socket 目录，必须仅属主可读写
 
 if command -v systemctl &>/dev/null && systemctl --user daemon-reload 2>/dev/null; then
     # systemd 模式
@@ -122,7 +127,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 $SCRIPT_DIR/mcp_daemon.py
+ExecStart=$PYTHON_BIN $SCRIPT_DIR/mcp_daemon.py
 Restart=always
 RestartSec=10
 # 日志由 mcp_daemon.py 的 TimedRotatingFileHandler 写入 ~/.smartbw-mcp/daemon.log（保留 30 天）。
@@ -136,7 +141,7 @@ SERVICE_EOF
     systemctl --user daemon-reload
     systemctl --user enable --now smartbw-daemon 2>/dev/null || {
         warn "systemd 启动失败，尝试后台模式..."
-        nohup python3 "$SCRIPT_DIR/mcp_daemon.py" >/dev/null 2>&1 &  # 日志由程序自身写入 daemon.log
+        nohup "$PYTHON_BIN" "$SCRIPT_DIR/mcp_daemon.py" >/dev/null 2>&1 &  # 日志由程序自身写入 daemon.log
         echo $! > "$DAEMON_DIR/daemon.pid"
     }
     sleep 2
@@ -145,7 +150,7 @@ SERVICE_EOF
     fi
 else
     # 后台进程模式
-    nohup python3 "$SCRIPT_DIR/mcp_daemon.py" >/dev/null 2>&1 &  # 日志由程序自身写入 daemon.log
+    nohup "$PYTHON_BIN" "$SCRIPT_DIR/mcp_daemon.py" >/dev/null 2>&1 &  # 日志由程序自身写入 daemon.log
     echo $! > "$DAEMON_DIR/daemon.pid"
     ok "daemon 已后台启动 (PID $(cat $DAEMON_DIR/daemon.pid))"
 fi
