@@ -3,7 +3,11 @@
 
 负责:
 - BwItem / SearchResult 数据类
-- TimeoutError / LockedError / ConnectionError 异常类
+- BwTimeoutError / LockedError / BwConnectionError 异常类
+
+命名约定: 自定义异常一律带 `Bw` 前缀，**不要**遮蔽内置的 `TimeoutError` /
+`ConnectionError` —— 否则 `except ConnectionError` 会静默漏捕内置 OSError 子类
+（如 socket 相关错误），且类型语义会随导入路径而变。
 """
 from dataclasses import dataclass
 from typing import List, Optional
@@ -39,8 +43,8 @@ class SearchResult:
 # 异常定义
 # ============================================================================
 
-class TimeoutError(Exception):
-    """请求超时异常"""
+class BwTimeoutError(Exception):
+    """请求超时异常（区别于内置 TimeoutError）"""
     pass
 
 
@@ -49,6 +53,6 @@ class LockedError(Exception):
     pass
 
 
-class ConnectionError(Exception):
-    """MCP 连接异常(进程无法启动/通信失败)"""
+class BwConnectionError(Exception):
+    """MCP/守护进程连接异常(进程无法启动/通信失败)"""
     pass

@@ -8,12 +8,10 @@
 - CLI 入口(main)
 """
 import difflib
-import json
-import logging
 import sys
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config import (
     CACHE_REFRESH_MIN_AGE,
@@ -25,11 +23,11 @@ from config import (
 )
 from mcp_raw import RealMCPClient
 from models import (
+    BwConnectionError,
     BwItem,
-    ConnectionError as MCPConnectionError,
+    BwTimeoutError,
     LockedError,
     SearchResult,
-    TimeoutError,
 )
 
 # ============================================================================
@@ -99,6 +97,8 @@ class SmartBitwardenMCP:
 
         # 搜索索引（随缓存整体替换，加速后续查询）
         self._name_index: Dict[str, List[Dict]] = {}  # normalized_name → [item_dict, ...]
+        # 原子快照：(items, index) 一次绑定，读侧永远看到一致的一对（P1-5）
+        self._snapshot: Optional[Tuple[List[Dict], Dict[str, List[Dict]]]] = None
 
         # O6 统计
         self._stat_hits = 0
@@ -120,6 +120,7 @@ class SmartBitwardenMCP:
 
     def clear_cache(self) -> None:
         """清除项目缓存与索引（下次查询重新装载，确保拿到最新数据）"""
+        self._snapshot = None
         self._items_cache = None
         self._cache_time = 0.0
         self._name_index = {}
@@ -149,13 +150,26 @@ class SmartBitwardenMCP:
         return (time.time() - last) >= CACHE_REFRESH_MIN_AGE
 
     def _install_items(self, items: List[Dict]) -> None:
-        """整体替换缓存与索引：先建好新索引再换指针，避免读到半成品。"""
+        """整体替换缓存与索引。
+
+        关键：`(items, index)` 必须以**一次绑定**替换 —— 读侧会同时使用两者，
+        分两次赋值会让读侧看到「新 items + 旧 index」的撕裂快照（P1-5）。
+        下面三个属性是镜像/便利访问，供既有读侧与测试使用。
+        """
         index: Dict[str, List[Dict]] = {}
         for item in items:
             index.setdefault(_normalize(item.get("name", "")), []).append(item)
+        self._snapshot = (items, index)   # 原子：单次属性绑定
         self._items_cache = items
         self._name_index = index
         self._cache_time = time.time()
+
+    def _snapshot_items(self) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
+        """原子读取一致的 (items, index) 快照。"""
+        snap = self._snapshot
+        if snap is None:
+            return self._items_cache or [], self._name_index
+        return snap
 
     def _fetch_with_temp_client(self) -> List[Dict]:
         """用独立连接拉取数据。
@@ -166,7 +180,7 @@ class SmartBitwardenMCP:
         tmp = RealMCPClient(self.client.timeout, use_daemon=True)
         try:
             if not tmp.initialize():
-                raise MCPConnectionError("守护进程不可用，无法拉取缓存")
+                raise BwConnectionError("守护进程不可用，无法拉取缓存")
             return _fetch_items(tmp)
         finally:
             try:
@@ -272,7 +286,7 @@ class SmartBitwardenMCP:
         """更新项目,返回是否成功"""
         try:
             return self.client.update_item(item_id, name, username, password, uri, notes)
-        except TimeoutError:
+        except BwTimeoutError:
             logger.error("update_item 超时")
             return False
         except LockedError:
@@ -286,7 +300,7 @@ class SmartBitwardenMCP:
         """删除项目,返回是否成功"""
         try:
             return self.client.delete_item(item_id)
-        except TimeoutError:
+        except BwTimeoutError:
             logger.error("delete_item 超时")
             return False
         except LockedError:
@@ -303,7 +317,7 @@ class SmartBitwardenMCP:
         """
         try:
             return self.client.get_item(item_id)
-        except TimeoutError:
+        except BwTimeoutError:
             logger.error("get_item_by_id 超时")
             return None
         except LockedError:
@@ -371,15 +385,16 @@ class SmartBitwardenMCP:
 
         force_refresh=True 时阻塞重建缓存，用于"无结果 / 结果可疑"的重查。
         """
-        items = self._ensure_items(force=force_refresh)
-        if not items:
+        if not self._ensure_items(force=force_refresh):
             return []
 
         # 快速路径：索引精确/前缀匹配（索引随缓存一同构建）
+        # 原子读取 (items, index)，避免与后台刷新交错时读到撕裂快照
+        items, name_index = self._snapshot_items()
         norm_q = _normalize(query)
-        exact_matches = self._name_index.get(norm_q, [])
+        exact_matches = name_index.get(norm_q, [])
         prefix_matches = []
-        for name, name_items in self._name_index.items():
+        for name, name_items in name_index.items():
             if name.startswith(norm_q) and name != norm_q:
                 prefix_matches.extend(name_items)
         indexed_items = exact_matches + prefix_matches
@@ -426,7 +441,6 @@ class SmartBitwardenMCP:
             for field in fields:
                 field_name = field.get("name", "")
                 field_value = field.get("value", "")
-                field_type = field.get("type", 0)  # 0=text, 1=hidden, 2=boolean
 
                 # 字段名匹配权重更高
                 field_name_score = _fuzzy_score(query, field_name)
@@ -502,7 +516,7 @@ class SmartBitwardenMCP:
 
                 # 密码为空但找到了记录
                 if attempt < max_retries - 1:
-                    logger.warning(f"密码为空,重试...")
+                    logger.warning("密码为空,重试...")
                     self.client.close()
                     time.sleep(0.5)
                     self.initialize()
@@ -516,7 +530,7 @@ class SmartBitwardenMCP:
                         logger.info(f"找到 '{best.item.name}' (解锁后)")
                         return password
                 raise
-            except TimeoutError as e:
+            except BwTimeoutError as e:
                 last_error = e
                 if attempt < max_retries - 1:
                     logger.warning(f"第 {attempt+1} 次尝试超时: {e},重试...")
@@ -712,7 +726,7 @@ def main():
     except KeyboardInterrupt:
         print("\n操作取消")
         sys.exit(130)
-    except TimeoutError as e:
+    except BwTimeoutError as e:
         print(f"❌ 超时: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:

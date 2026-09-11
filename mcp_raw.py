@@ -13,11 +13,13 @@ import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from config import DEFAULT_TIMEOUT, get_config, logger
-from models import ConnectionError, LockedError, TimeoutError
+from models import BwConnectionError, BwTimeoutError, LockedError
+
+if TYPE_CHECKING:
+    from mcp_daemon import DaemonClient
 
 # ============================================================================
 # MCP 客户端（纯 daemon 模式）
@@ -29,7 +31,7 @@ class RealMCPClient:
     def __init__(self, timeout: int = DEFAULT_TIMEOUT, use_daemon: bool = True):
         self.initialized = False
         self.timeout = timeout
-        self._daemon_client: 'DaemonClient' = None  # type: ignore
+        self._daemon_client: Optional[DaemonClient] = None
 
         # 熔断器
         self._failure_count = 0
@@ -44,10 +46,11 @@ class RealMCPClient:
         logger.info(f"Bitwarden 服务器: {self.bw_host}")
 
         try:
-            from mcp_daemon import DaemonClient
-            self._daemon_client = DaemonClient(timeout=self.timeout)
+            # 别名导入：避免与本函数注解引用的 DaemonClient 局部名冲突（F823）
+            from mcp_daemon import DaemonClient as _DaemonClient
+            self._daemon_client = _DaemonClient(timeout=self.timeout)
         except ImportError as e:
-            raise ConnectionError(f"无法导入 mcp_daemon 模块: {e}")
+            raise BwConnectionError(f"无法导入 mcp_daemon 模块: {e}")
 
     # ─── JSON-RPC 通信 ──────────────────────
 
@@ -60,11 +63,11 @@ class RealMCPClient:
                 error = result["error"]
                 raise Exception(f"MCP 错误 [{error.get('code')}]: {error.get('message')}")
             return result.get("result", {})
-        except TimeoutError:
+        except BwTimeoutError:
             raise
         except Exception as e:
             # 使用类型检查替代字符串匹配，避免 locale 差异
-            if isinstance(e, (OSError, socket.error)):
+            if isinstance(e, (OSError, socket.error, BwConnectionError)):
                 logger.warning("守护进程断开，尝试重连...")
             elif "Connection" in str(e) or "BrokenPipe" in str(e):
                 # 兜底：catch-all 字符串匹配（处理来自模型的包装异常）
@@ -83,7 +86,7 @@ class RealMCPClient:
                     raise Exception(f"MCP 错误 [{error.get('code')}]: {error.get('message')}")
                 return result.get("result", {})
             except Exception as retry_err:
-                raise ConnectionError(f"守护进程重连失败: {retry_err}")
+                raise BwConnectionError(f"守护进程重连失败: {retry_err}")
 
     # ─── 连接管理 ──────────────────────────
 
@@ -151,7 +154,7 @@ class RealMCPClient:
                 "tools/call",
                 {"name": tool_name, "arguments": arguments}
             )
-        except TimeoutError:
+        except BwTimeoutError:
             self.initialized = False
             raise
 
@@ -198,14 +201,23 @@ class RealMCPClient:
             result = operation_func(*args, **kwargs)
             self._reset_circuit()
             return result
-        except (LockedError, TimeoutError, ConnectionError):
+        except (LockedError, BwTimeoutError, BwConnectionError):
+            self._record_failure()
+            raise
+        except Exception:
+            # 通用异常（例如服务端业务错误被 call_tool 包成 Exception）同样计入熔断，
+            # 否则 README「连续 5 次失败 → 30s 冷却」的承诺不成立。
             self._record_failure()
             raise
 
     # ─── Bitwarden 操作 ─────────────────────
 
     def list_items(self, type: str = "items", **kwargs) -> List[Dict]:
-        """列出项目"""
+        """列出项目。
+
+        不再吞掉异常：拉取失败必须让调用方看见（`_load_items_blocking` 会保留旧缓存），
+        否则"无数据"与"拉取失败"无法区分，还会把空列表当成合法结果写入长驻缓存。
+        """
         def _do():
             args = {"type": type, "trash": False}
             args.update(kwargs)
@@ -219,17 +231,7 @@ class RealMCPClient:
                     return []
             return []
 
-        try:
-            return self._with_circuit(_do)
-        except LockedError:
-            logger.error("list_items 失败（熔断/锁定）")
-            return []
-        except TimeoutError:
-            logger.error("list_items 超时")
-            return []
-        except ConnectionError:
-            logger.error("list_items 连接失败")
-            return []
+        return self._with_circuit(_do)
 
     def get_item(self, item_id: str) -> Optional[Dict]:
         """获取项目详情"""
@@ -239,9 +241,9 @@ class RealMCPClient:
 
         try:
             return self._with_circuit(_do)
-        except (LockedError, TimeoutError):
+        except (LockedError, BwTimeoutError):
             return None
-        except ConnectionError:
+        except BwConnectionError:
             logger.error("get_item 连接失败")
             return None
 
@@ -253,9 +255,9 @@ class RealMCPClient:
 
         try:
             return self._with_circuit(_do)
-        except (LockedError, TimeoutError):
+        except (LockedError, BwTimeoutError):
             return None
-        except ConnectionError:
+        except BwConnectionError:
             logger.error("get_password 连接失败")
             return None
 
@@ -285,7 +287,7 @@ class RealMCPClient:
 
         try:
             return self._with_circuit(_do)
-        except (LockedError, TimeoutError):
+        except (LockedError, BwTimeoutError):
             logger.error("create_item 失败")
             return None
         except Exception as e:
@@ -314,7 +316,7 @@ class RealMCPClient:
 
         try:
             return self._with_circuit(_do)
-        except (LockedError, TimeoutError):
+        except (LockedError, BwTimeoutError):
             return False
         except Exception as e:
             logger.error(f"update_item 失败: {e}")
@@ -327,7 +329,7 @@ class RealMCPClient:
 
         try:
             return self._with_circuit(_do)
-        except (LockedError, TimeoutError):
+        except (LockedError, BwTimeoutError):
             return False
         except Exception as e:
             logger.error(f"delete_item 失败: {e}")

@@ -28,6 +28,11 @@ Thumbs.db
 
 # Test artifacts
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
 *.egg-info/
 dist/
 build/

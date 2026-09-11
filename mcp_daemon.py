@@ -7,7 +7,7 @@ SmartBW MCP Daemon - 常驻 MCP 服务器守护进程
   2. 通过 Unix socket 接收 JSON-RPC 请求，代理到 mcp-server
   3. 自动解锁/重新登录
   4. 崩溃自动重启
-  5. 支持多客户端并发
+  5. 串行处理客户端请求（事件循环单线程；多连接只排队，不并行执行）
 
 用法:
   python3 mcp_daemon.py                     # 前台运行
@@ -35,13 +35,15 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
-# 导入自定义异常（与 mcp_raw.py 使用的类型一致）
+# 导入自定义异常（与 mcp_raw.py 使用的类型一致）。
+# 切勿用内置名 TimeoutError / ConnectionError 作别名 —— 那会遮蔽内置异常，
+# 让 `except ConnectionError` 漏捕 OSError 子类。
 try:
-    from models import ConnectionError as MCPConnectionError
-    from models import TimeoutError as MCPTimeoutError
-except ImportError:
-    # 回退：用内置类型
-    MCPTimeoutError = TimeoutError  # type: ignore
+    from models import BwConnectionError as MCPConnectionError
+    from models import BwTimeoutError as MCPTimeoutError
+except ImportError:  # pragma: no cover - models.py 与本模块同目录，正常总是可导入
+    # 回退：用内置类型（仍然不遮蔽它们）
+    MCPTimeoutError = TimeoutError
     MCPConnectionError = ConnectionError
 
 # === 配置 ===
@@ -69,11 +71,20 @@ def _setup_file_logging():
         return  # 已初始化
     try:
         from logging.handlers import TimedRotatingFileHandler
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # 显式收紧权限：不能依赖 umask（不同环境可能是 022/002，都会让同组可读）
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(LOG_FILE.parent, 0o700)  # mkdir 的 mode 对"已存在目录"无效
+        except OSError:
+            pass
         _file_handler = TimedRotatingFileHandler(
             str(LOG_FILE), when='midnight', interval=1, backupCount=30,
             encoding='utf-8'
         )
+        try:
+            os.chmod(str(LOG_FILE), 0o600)  # FileHandler 构造时已创建文件
+        except OSError:
+            pass
         _file_handler.setFormatter(logging.Formatter(
             '%(asctime)s [daemon] %(levelname)s %(message)s'
         ))
@@ -176,16 +187,22 @@ class MCPServerManager:
         env["BW_HOST"] = bw_host
 
         logger.info(f"启动 MCP Server: {mcp_path}")
+        # 二进制模式：_send_raw 用 os.read 做非阻塞分帧（P1-7），
+        # 若走 text=True 的 TextIOWrapper 会与其预读缓冲冲突。
+        # stderr 必须有人排空，否则子进程写满管道缓冲后会卡死（P2-11）。
         self.process = subprocess.Popen(
             ["node", mcp_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=False,
             env=env,
-            bufsize=1,
             start_new_session=True,
         )
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, args=(self.process,), daemon=True
+        )
+        self._stderr_thread.start()
         time.sleep(0.5)
         if self.process.poll() is not None:
             logger.error("MCP Server 启动失败")
@@ -208,7 +225,7 @@ class MCPServerManager:
                     stdin = self.process.stdin
                     if stdin:
                         stdin.write(
-                            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+                            (json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n").encode()
                         )
                         stdin.flush()
                 except Exception:
@@ -224,49 +241,76 @@ class MCPServerManager:
         self._request_id += 1
         return self._request_id
 
+    def _drain_stderr(self, process):
+        """排空子进程 stderr，避免管道写满导致子进程阻塞（内容仅记 DEBUG）。"""
+        try:
+            stream = process.stderr
+            if stream is None:
+                return
+            for raw in iter(stream.readline, b""):
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    logger.debug(f"[mcp-server stderr] {line}")
+        except Exception:
+            pass
+
     def _send_raw(self, request: dict, timeout: float = 30.0) -> Optional[dict]:
-        """直接发送 JSON-RPC 请求到子进程"""
+        """直接发送 JSON-RPC 请求到子进程。
+
+        读取采用「poll + os.read + 自维护缓冲区按 \\n 分帧」，而不是
+        `stdout.readline()`：poll 只保证管道里有数据，不保证有一整行，
+        在管道上的 readline() 没有超时保护，一旦半行到达就会连同 `self._lock`
+        一起永久阻塞，导致整个 daemon 假死（P1-7）。
+        """
         with self._lock:
             if not self.process or self.process.poll() is not None:
-                raise ConnectionError("MCP 进程已退出")
+                raise MCPConnectionError("MCP 进程已退出")
 
-            raw = json.dumps(request) + "\n"
+            stdin = self.process.stdin
+            if stdin is None:
+                raise MCPConnectionError("MCP stdin 不可用")
             try:
-                stdin = self.process.stdin
-                if stdin:
-                    stdin.write(raw)
-                    stdin.flush()
+                stdin.write((json.dumps(request) + "\n").encode())
+                stdin.flush()
             except Exception:
-                raise ConnectionError("MCP stdin 写入失败")
+                raise MCPConnectionError("MCP stdin 写入失败")
 
-            # 等待响应（跳过 notification，直到收到带 id 的响应）
-            start = time.time()
-            poll = select.poll()
             stdout = self.process.stdout
-            poll.register(stdout, select.POLLIN) if stdout else None
+            if stdout is None:
+                raise MCPConnectionError("MCP stdout 不可用")
+            fd = stdout.fileno()
+            poll = select.poll()
+            poll.register(fd, select.POLLIN)
             request_id = request.get("id")
+            buf = b""
+            start = time.time()
 
             while (time.time() - start) < timeout:
-                ready = poll.poll(100)
-                if ready and stdout:
-                    line = stdout.readline()
-                    if not line:
-                        if self.process.poll() is not None:
-                            raise ConnectionError("MCP 进程退出")
-                        continue
+                if poll.poll(100):
                     try:
-                        msg = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    # 跳过 notification 和 id 不匹配的响应
-                    if "method" in msg and "id" not in msg:
-                        logger.debug(f"跳过 notification: {msg.get('method')}")
-                        continue
-                    if "id" in msg and msg["id"] == request_id:
-                        return msg
-                    logger.debug(f"跳过 id 不匹配: {msg.get('id')} != {request_id}")
+                        chunk = os.read(fd, 65536)
+                    except (OSError, BlockingIOError):
+                        chunk = b""
+                    if chunk:
+                        buf += chunk
+                        while b"\n" in buf:
+                            line, _, buf = buf.partition(b"\n")
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                msg = json.loads(line.decode("utf-8", errors="replace"))
+                            except json.JSONDecodeError:
+                                continue
+                            # 跳过 notification 和 id 不匹配的响应
+                            if "method" in msg and "id" not in msg:
+                                logger.debug(f"跳过 notification: {msg.get('method')}")
+                                continue
+                            if "id" in msg and msg["id"] == request_id:
+                                return msg
+                            logger.debug(f"跳过 id 不匹配: {msg.get('id')} != {request_id}")
                 if self.process.poll() is not None:
-                    raise ConnectionError("MCP 进程退出")
+                    raise MCPConnectionError("MCP 进程退出")
 
             raise MCPTimeoutError(f"MCP 响应超时 ({timeout}s)")
 
@@ -404,7 +448,7 @@ class DaemonServer:
     def _health_check_loop(self):
         """定期检查 MCP 进程健康 + Session 有效性，异常时自动恢复"""
         last_session_check = 0
-        SESSION_CHECK_INTERVAL = 120  # 120 秒内检测并恢复过期 session
+        session_check_interval = 120  # 120 秒内检测并恢复过期 session
 
         while self._running:
             time.sleep(60)
@@ -413,7 +457,7 @@ class DaemonServer:
 
             now = time.time()
             # Session 有效性检查（每 120s 一次）
-            if now - last_session_check > SESSION_CHECK_INTERVAL:
+            if now - last_session_check > session_check_interval:
                 last_session_check = now
                 if self._check_session_valid():
                     logger.debug("[EVENT] session_check: valid")
@@ -457,7 +501,7 @@ class DaemonServer:
         while self._running:
             try:
                 events = poller.poll(500)  # 500ms
-            except (OSError, select.error):
+            except OSError:
                 continue
 
             for fd, event in events:
@@ -602,10 +646,7 @@ class DaemonClient:
         return self.sock is not None
 
     def send_request(self, method: str, params: dict) -> dict:
-        """发送请求（线程安全：锁保护收发原子性 + 逐 chunk 超时）"""
-        if not self.sock:
-            raise ConnectionError("未连接到守护进程")
-
+        """发送请求（线程安全：与 close() 共用 _send_lock + 逐 chunk 超时）"""
         request = {
             "jsonrpc": "2.0",
             "id": random.randint(1, 999999),
@@ -616,19 +657,22 @@ class DaemonClient:
         raw = json.dumps(request) + "\n"
 
         with self._send_lock:
-            self.sock.sendall(raw.encode())
+            sock = self.sock
+            if sock is None:
+                raise MCPConnectionError("未连接到守护进程")
+            sock.sendall(raw.encode())
             buf = b""
             start = time.time()
             while (time.time() - start) < self.timeout:
                 # 每次 recv 独立超时（min 5s, 剩余时间）
                 remaining = max(0.5, self.timeout - (time.time() - start))
                 try:
-                    self.sock.settimeout(min(5.0, remaining))
-                    chunk = self.sock.recv(4096)
+                    sock.settimeout(min(5.0, remaining))
+                    chunk = sock.recv(4096)
                 except (socket.timeout, BlockingIOError):
                     continue
                 if not chunk:
-                    raise ConnectionError("守护进程断开")
+                    raise MCPConnectionError("守护进程断开")
                 buf += chunk
                 while b"\n" in buf:
                     line, _, buf = buf.partition(b"\n")
@@ -643,12 +687,18 @@ class DaemonClient:
             raise MCPTimeoutError(f"守护进程响应超时 ({self.timeout}s)")
 
     def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except OSError:
-                pass
-            self.sock = None
+        """关闭连接。
+
+        必须与 send_request 共用 _send_lock：否则一个线程 close() 把 sock 置 None
+        时，正在 sendall/recv 的线程会拿到 None 或在收发中途被关闭（P1-6）。
+        """
+        with self._send_lock:
+            if self.sock:
+                try:
+                    self.sock.close()
+                except OSError:
+                    pass
+                self.sock = None
 
 
 # === CLI ===
@@ -665,11 +715,32 @@ def _is_daemon_running():
         return False
 
 
+def _pid_is_daemon(pid: int) -> Optional[bool]:
+    """校验 pid 是否仍是本守护进程（读 /proc/<pid>/cmdline）。
+
+    返回 True / False；无法校验（非 Linux、或读不到 cmdline）时返回 None。
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return "mcp_daemon" in cmdline
+
+
 def _stop_daemon():
     if not _is_daemon_running():
         print("守护进程未运行")
         return
     pid = int(PID_FILE.read_text().strip())
+    # PID 复用防护：陈旧 PID 文件 + 系统把同号分配给别的进程时会误杀无关进程
+    verdict = _pid_is_daemon(pid)
+    if verdict is False:
+        print(f"⚠️ PID {pid} 不是 smartbw 守护进程（疑似 PID 复用），已跳过；"
+              f"请手动检查并清理 {PID_FILE}")
+        return
+    if verdict is None:
+        print(f"⚠️ 无法校验 PID {pid} 归属（非 Linux？），仍按守护进程处理")
     os.kill(pid, signal.SIGTERM)
     print(f"已发送停止信号到 PID {pid}")
 
