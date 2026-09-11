@@ -15,8 +15,8 @@
 |---------|------|
 | §0.1 P1-3「部分修复」 | ✅ 已修复（本版） |
 | §4.1 熔断语义可能过宽 | 保持现状（`_with_circuit` 计通用异常是 R3 报告的明确建议，且已由 `test_circuit_counts_generic_exception` 固化）；是否细分"业务错误/连接错误"属产品决策，暂不改动 |
-| §4.2 CI 尚未真实运行 | 待推送后由 GitHub Actions 验证（本地无法代跑） |
-| §4.3 py3.8 未实证 | 本机补测 **Python 3.12.13**：`48 passed / 2 skipped`、覆盖率 34%（与 3.10 一致）；3.8 解释器本机不存在，改由 `ruff target-version = "py38"` + CI matrix 兜底 |
+| §4.2 CI 尚未真实运行 | ✅ **已验证**：推送后 `CI` 与 `Config Leak Check` 两个 workflow 均 success（run `34592738658`） |
+| §4.3 py3.8 未实证 | ✅ **已验证**：CI matrix 在**真实 Python 3.8** 上通过（本地另补测 3.12.13：`49 passed / 2 skipped`，覆盖率 34%，与 3.10 一致） |
 | §4.4 覆盖率门槛偏松 | 暂保留 30（当前 34%）；`smartbw_mcp_server.py` 工具层补测列为后续事项 |
 
 ## [2.3.2] - 2026-09-11
