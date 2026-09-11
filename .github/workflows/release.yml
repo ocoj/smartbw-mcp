@@ -1,0 +1,102 @@
+name: Release
+
+# 目的：**版本号一旦变更并推到 main，就自动补 tag 与 GitHub Release**。
+# 背景：曾出现「代码已是 2.3.8，而 GitHub 版本仍停在 v2.3.0」——因为 tag/Release
+# 全靠手工，容易漏。tag 与 Release 是纯机械动作，交给 CI；版本号本身仍由人/AI 显式
+# bump（可用 scripts/bump-version.sh 一键同步三处）。
+#
+# 幂等：tag 已存在则整个 job 跳过，因此每次 push 都跑也无副作用。
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  auto-release:
+    name: 自动 tag + Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # 需要全部 tag 才能判断是否已存在
+
+      - name: 读取 pyproject 版本
+        id: ver
+        run: |
+          V=$(python3 -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v$V" >> "$GITHUB_OUTPUT"
+          echo "读到的版本号：$V"
+
+      - name: 三处版本一致性校验（pyproject / serverInfo / CHANGELOG）
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          v = pathlib.Path('pyproject.toml').read_text(encoding='utf-8')
+          v = re.search(r'^version\s*=\s*"([^"]+)"', v, re.M).group(1)
+          srv = pathlib.Path('smartbw_mcp_server.py').read_text(encoding='utf-8')
+          sv = re.search(r'"serverInfo":\s*\{"name":\s*"smartbw-mcp",\s*"version":\s*"([^"]+)"', srv)
+          chg = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
+          cv = re.search(r'^##\s*\[([^\]]+)\]', chg, re.M)
+          got = {'pyproject': v, 'serverInfo': sv.group(1) if sv else '(未找到)'}
+          print('版本一致性检查:', got, '| CHANGELOG 顶部:', cv.group(1) if cv else '(未找到)')
+          bad = [k for k, val in got.items() if val != v]
+          if bad or (cv and cv.group(1) != v):
+              print(f'❌ 版本不一致（期望 {v}）', file=sys.stderr)
+              sys.exit(1)
+          print('✅ 三处版本一致')
+          PY
+
+      - name: 检查 tag 是否已存在
+        id: check
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "tag ${{ steps.ver.outputs.tag }} 已存在 → 跳过"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "tag ${{ steps.ver.outputs.tag }} 不存在 → 将创建"
+          fi
+
+      - name: 打注解 tag 并推送
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.ver.outputs.tag }}" \
+            -m "release ${{ steps.ver.outputs.tag }}（版本号由 pyproject.toml 推导）"
+          git push origin "${{ steps.ver.outputs.tag }}"
+
+      - name: 从 CHANGELOG 提取发行说明
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          python3 - <<'PY' > /tmp/release-notes.md
+          import pathlib, re, os
+          v = os.environ["VER"]
+          text = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
+          m = re.search(rf'^##\s*\[{re.escape(v)}\][^\n]*\n(.*?)(?=^##\s*\[|\Z)',
+                        text, re.S | re.M)
+          body = m.group(1).strip() if m else f'版本 {v} 发布。'
+          print(body)
+          print()
+          print('---')
+          print(f'完整变更见 [CHANGELOG.md](https://github.com/'
+                f'{os.environ["GITHUB_REPOSITORY"]}/blob/main/CHANGELOG.md)')
+          PY
+          echo "---- 发行说明预览（前 15 行）----"
+          head -15 /tmp/release-notes.md
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+
+      - name: 创建 GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            --title "${{ steps.ver.outputs.tag }}" \
+            --notes-file /tmp/release-notes.md
+          echo "已创建 Release：${{ steps.ver.outputs.tag }}"
