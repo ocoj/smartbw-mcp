@@ -405,16 +405,24 @@ class MCPServerManager:
 def _socket_is_live(path: Path, timeout: float = 0.5) -> bool:
     """`path` 上是否有**活着的**守护进程在监听。
 
-    connect 成功 ⇒ 有监听者；ECONNREFUSED / ENOENT 等 ⇒ 陈旧文件或根本不存在。
-    用于区分"陈旧 socket 文件（可安全 unlink）"与"别的实例正在监听（不可抢）"。
+    只有"明确无监听者"的信号才算陈旧（可安全 unlink）：
+    - `ECONNREFUSED`：文件在、无人监听
+    - `ENOENT` / `ENOTDIR`：路径不存在或中间层不是目录
+
+    其余 `OSError`（`EAGAIN` = 连接队列已满、`socket.timeout` 等）属于**无法判定**，
+    一律保守视为"活着"。否则一次队列拥塞就会把活实例的 socket 误判成陈旧文件并被
+    unlink 抢占 —— 正是本函数要防的那种分裂状态（实测：backlog 满时 errno=11）。
     """
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         probe.settimeout(timeout)
         probe.connect(str(path))
         return True
-    except OSError:
-        return False
+    except (ConnectionRefusedError, FileNotFoundError, NotADirectoryError):
+        return False  # 明确无监听者 → 陈旧文件，可安全清理
+    except OSError as e:
+        logger.warning("socket 探测无法判定（%s），保守视为存活，放弃启动: %s", e, path)
+        return True
     finally:
         try:
             probe.close()

@@ -1,5 +1,24 @@
 # 变更日志
 
+## [2.3.7] - 2026-09-11
+
+> 依据第三方复核报告（内部文档）F-2 项：2.3.6 新增的 socket 存活探测存在**异常分类过粗**的盲点。
+
+### 🔴 修复
+
+- **`_socket_is_live()` 把"无法判定"当成"陈旧"**: 原实现 `except OSError: return False` 把 `EAGAIN`（连接队列已满）与 `ECONNREFUSED`（无人监听）混为一谈。实测：监听者存活但 backlog 已满时探测返回 `False`（`errno=11`，3/3 稳定复现）⇒ 调用方随即 `unlink()` + `bind()`，会把活实例的 socket 抢走 —— 正是 2.3.6 要消除的那种分裂状态。
+  现收窄为白名单：仅 `ECONNREFUSED` / `ENOENT` / `ENOTDIR` 判为陈旧（可安全清理），其余 `OSError`（`EAGAIN`、超时等）**保守视为存活**并记 WARNING。
+  风险等级：**低** —— 新实例必须先通过 `daemon.lock` 排他锁，仅在锁未生效时（旧版本进程仍在运行 / 锁文件创建失败退化无锁 / 非 Unix）才会暴露；但属纵深防御最后一层的盲点，故予修复
+
+### 🧪 测试
+
+- 新增 `test_socket_is_live_treats_backlog_full_as_alive`：`listen(1)` 后塞满连接队列，断言判定为"存活"（原用例仅覆盖 监听者 / 陈旧文件 / 不存在 三态）
+- 验证：`59 passed / 2 skipped`；`ruff check .` 全绿；定向复测 3/3 通过
+
+### 📝 文档
+
+- README 配置表补 `SMARTBW_DAEMON_WAIT`（默认 5s，`0` 关闭）—— 该变量在 2.3.6 引入，此前仅见于 CHANGELOG
+
 ## [2.3.6] - 2026-09-11
 
 > 修复会话巡检中实测发现的 **daemon 双实例竞态**（既有缺陷，非 2.3.2~2.3.5 引入）。

@@ -132,6 +132,7 @@ python3 mcp_daemon.py
 | MCP Server 路径 | `MCP_SERVER_PATH` / `BITWARDEN_MCP_SERVER_PATH` | 留空自动发现（npm/which/常见路径） |
 | 自定义配置目录 | `SMARTBW_CONFIG_DIR` | 默认 `~/.config/bitwarden-mcp/`；支持 `~` 展开，读写与加密均以该目录为准 |
 | daemon Socket 路径 | `SMARTBW_SOCKET_PATH` | 默认 `~/.smartbw-mcp/daemon.sock`。仅覆盖 socket 一个路径，便于"隔离 HOME 但连真实 daemon"（如真机测试） |
+| daemon 启动宽限 | `SMARTBW_DAEMON_WAIT` | 默认 5s；连不上时先反复重试该时长再考虑拉起新实例（设 `0` 关闭），避免重启窗口内造出第二个 daemon |
 | MCP 超时 | `SMARTBW_MCP_TIMEOUT` | 默认 30s |
 | 模糊搜索阈值 | `SMARTBW_FUZZY_THRESHOLD` | 默认 0.5 |
 | 缓存 TTL | `SMARTBW_CACHE_TTL` | 默认 15s；过期即同步刷新，无定时器 |

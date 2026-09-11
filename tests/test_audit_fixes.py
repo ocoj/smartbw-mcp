@@ -454,6 +454,39 @@ def test_socket_is_live_distinguishes_listener_from_stale(tmp_path):
     assert mcp_daemon._socket_is_live(live) is False
 
 
+def test_socket_is_live_treats_backlog_full_as_alive(tmp_path):
+    """连接队列满（EAGAIN）时必须保守判为"活着"。
+
+    否则调用方会 unlink + bind，把正在运行实例的 socket 抢走 —— 即 v2.3.6 要修的
+    那种分裂状态（实测：backlog 满时探测 errno=11，收窄前的实现返回 False）。
+    """
+    import socket as _socket
+
+    import mcp_daemon
+
+    sock = tmp_path / "busy.sock"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    queued = []
+    try:
+        srv.bind(str(sock))
+        srv.listen(1)  # 极小 backlog，便于塞满未 accept 的连接队列
+        for _ in range(6):
+            c = _socket.socket(_socket.AF_UNIX)
+            c.setblocking(False)
+            try:
+                c.connect(str(sock))
+                queued.append(c)
+            except OSError:
+                pass
+        assert mcp_daemon._socket_is_live(sock) is True, (
+            "队列满(EAGAIN)被误判为陈旧，会导致 unlink+bind 抢占活实例 socket"
+        )
+    finally:
+        for c in queued:
+            c.close()
+        srv.close()
+
+
 def test_daemon_lock_is_exclusive(monkeypatch, tmp_path):
     """启动排他锁：同一时刻只有一个持有者（第二次获取必须失败）。"""
     import mcp_daemon

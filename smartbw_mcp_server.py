@@ -249,7 +249,7 @@ def _handle_init(_id, _params):
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.6"}
+        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.7"}
     }
 
 

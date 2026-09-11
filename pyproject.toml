@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smartbw-mcp"
-version = "2.3.6"
+version = "2.3.7"
 description = "Vaultwarden 智能代理 — 一行代码获取密码，AI 零门槛使用"
 readme = "README.md"
 requires-python = ">=3.8"
