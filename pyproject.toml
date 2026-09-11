@@ -1,10 +1,10 @@
 [build-system]
 requires = ["setuptools>=64.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "smartbw-mcp"
-version = "2.3.1"
+version = "2.3.2"
 description = "Vaultwarden 智能代理 — 一行代码获取密码，AI 零门槛使用"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -28,7 +28,9 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "cryptography>=3.0",
+    # 下限与"现代 Python 可安装"自洽；3.0 在新解释器上已无法构建。
+    # 如需放弃 Python 3.8，可在此基础上继续上调。
+    "cryptography>=3.4.8",
 ]
 
 [project.optional-dependencies]
@@ -50,12 +52,13 @@ test = [
 smartbw-mcp = "smartbw_mcp_server:main"
 smartbw-daemon = "mcp_daemon:main"
 
-[tool.setuptools.py-modules]
+[tool.setuptools]
 # 扁平模块 — 根目录下的 .py 文件，非包目录
-modules = [
-    "config", "crypto_config", "mcp_daemon", "mcp_raw",
-    "models", "smart_search", "smartbw_mcp_server", "unlock",
+py-modules = [
+    "config", "crypto_config", "mcp_daemon", "mcp_raw", "models",
+    "paths", "smart_search", "smartbw_mcp_server", "unlock",
 ]
+package-dir = {"" = "."}
 
 [tool.pytest.ini_options]
 minversion = "7.0"

@@ -6,29 +6,46 @@ Config 加密/解密模块 — 保护 config.json 中敏感字段
 
 格式: "!enc:v1:{base64url(Fernet token)}"
 
-设计目标: config.json 意外泄露时 master_password/client_secret 不可读
+设计目标: config.json 意外泄露时 master_password / client_secret / api_key 不可读
 不可防: 本机 root 攻击（可读 machine-id 和 hostname）
+
+路径解析统一走 `paths`，与 config.py 保持同一语义（支持 SMARTBW_CONFIG_DIR）。
 """
-import os
-import json
-import socket
 import base64
+import json
 import logging
+import os
 import shutil
+import socket
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from paths import config_path, env_path, is_default_runtime_dir
 
 logger = logging.getLogger(__name__)
 
-SENSITIVE_KEYS = ["master_password", "client_secret"]
+# 需要加密落盘的敏感字段。
+# api_key 是 "user.<clientId>.<clientSecret>" 单字段形式，内含 clientSecret，必须一并保护。
+SENSITIVE_KEYS = ["master_password", "client_secret", "api_key"]
 ENCRYPTED_PREFIX = "!enc:v1:"
-CONFIG_PATH = Path.home() / ".config" / "bitwarden-mcp" / "config.json"
-ENV_PATH = CONFIG_PATH.parent / ".env"  # 与 config.json 同目录的 .env 兜底
 REINIT_FILE = Path.home() / ".smartbw-mcp" / "NEEDS_REINIT"
+
+
+def __getattr__(name):
+    """兼容旧引用：CONFIG_PATH / ENV_PATH 改为每次访问时重新解析。
+
+    不能在 import 期求值 —— 否则 SMARTBW_CONFIG_DIR 一旦在进程内变更
+    （含 get_config(refresh=True) 场景），路径会停留在首次 import 时的值。
+    """
+    if name == "CONFIG_PATH":
+        return config_path()
+    if name == "ENV_PATH":
+        return env_path()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _get_machine_id() -> str:
@@ -81,8 +98,9 @@ def decrypt_value(encrypted: str) -> Optional[str]:
 def _load_env_master_password() -> Optional[str]:
     """回退: 从 .secrets/.env 读取主密码"""
     try:
-        if ENV_PATH.exists():
-            with open(ENV_PATH) as f:
+        path = env_path()
+        if path.exists():
+            with open(path) as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("BW_MASTER_PASSWORD="):
@@ -95,13 +113,31 @@ def _load_env_master_password() -> Optional[str]:
 
 
 def _write_reinit(message: str):
-    """写入 NEEDS_REINIT 标记文件"""
+    """写入 NEEDS_REINIT 标记文件。
+
+    位置固定在运行目录 `~/.smartbw-mcp/`（不属于配置目录，故不受 SMARTBW_CONFIG_DIR 影响）。
+    """
     try:
         REINIT_FILE.parent.mkdir(parents=True, exist_ok=True)
         REINIT_FILE.write_text(message)
     except (OSError, PermissionError):
         pass
     logger.error(message)
+
+
+def _marker_belongs_to(cfg_file: Path) -> bool:
+    """判断现有标记是否描述"本配置目录"。
+
+    标记位置是全局的（运行目录），因此不能无条件删除 —— 否则用 SMARTBW_CONFIG_DIR
+    指向别的目录时，会把默认目录的合法标记误删（跨目录干扰，与 P0-2 同族）。
+    我们写入的内容里含 config.json 的绝对路径，可据此归属判断。
+    """
+    if is_default_runtime_dir():
+        return True  # 默认目录：沿用原行为，历史标记一律清理
+    try:
+        return str(cfg_file) in REINIT_FILE.read_text()
+    except (OSError, PermissionError):
+        return False
 
 
 def process_config_on_startup() -> Dict[str, str]:
@@ -114,11 +150,12 @@ def process_config_on_startup() -> Dict[str, str]:
 
     返回: 解密后的 config dict (master_password 等已还原为明文)
     """
-    if not CONFIG_PATH.exists():
+    cfg_file = config_path()
+    if not cfg_file.exists():
         return {}
 
     try:
-        with open(CONFIG_PATH) as f:
+        with open(cfg_file) as f:
             config = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.error(f"读取 config.json 失败: {e}")
@@ -151,7 +188,7 @@ def process_config_on_startup() -> Dict[str, str]:
                         _write_reinit(
                             f"加密凭证解密失败且 master_password 无回退源\n"
                             f"原因: 机器指纹已变更 (hostname={socket.gethostname()})\n"
-                            f"修复: 编辑 {CONFIG_PATH}\n"
+                            f"修复: 编辑 {cfg_file}\n"
                             f"      将 master_password 设为新的明文密码\n"
                             f"      重启: systemctl --user restart smartbw-daemon"
                         )
@@ -172,7 +209,7 @@ def process_config_on_startup() -> Dict[str, str]:
 
     if need_save:
         try:
-            config_path_str = str(CONFIG_PATH)
+            config_path_str = str(cfg_file)
             tmp = config_path_str + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
@@ -182,8 +219,8 @@ def process_config_on_startup() -> Dict[str, str]:
         except (OSError, PermissionError) as e:
             logger.error(f"写入 config.json 失败: {e}")
 
-    # 清理旧的 reinit 标记
-    if REINIT_FILE.exists():
+    # 清理 reinit 标记（仅当它属于本配置目录，避免跨目录干扰）
+    if REINIT_FILE.exists() and _marker_belongs_to(cfg_file):
         REINIT_FILE.unlink()
 
     return result
@@ -191,24 +228,25 @@ def process_config_on_startup() -> Dict[str, str]:
 
 def reinit_config():
     """命令行 --reinit: 备份 config.json, 清空敏感字段"""
-    if not CONFIG_PATH.exists():
-        print(f"config.json 不存在: {CONFIG_PATH}")
+    cfg_file = config_path()
+    if not cfg_file.exists():
+        print(f"config.json 不存在: {cfg_file}")
         return
 
-    bak = CONFIG_PATH.with_suffix(".reinit.bak")
-    shutil.copy2(CONFIG_PATH, bak)
+    bak = cfg_file.with_suffix(".reinit.bak")
+    shutil.copy2(cfg_file, bak)
     print(f"已备份: {bak}")
 
-    with open(CONFIG_PATH) as f:
+    with open(cfg_file) as f:
         config = json.load(f)
     for key in SENSITIVE_KEYS:
         config[key] = ""
-    with open(CONFIG_PATH, "w") as f:
+    with open(cfg_file, "w") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     _write_reinit(
         f"需要重新配置凭证\n"
-        f"操作: 编辑 {CONFIG_PATH}\n"
+        f"操作: 编辑 {cfg_file}\n"
         f"      将 master_password 设为新的明文密码\n"
         f"      重启: systemctl --user restart smartbw-daemon"
     )

@@ -16,7 +16,9 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
+
+from paths import runtime_dir
 
 # ============================================================================
 # 全局常量（可通过环境变量覆盖）
@@ -54,11 +56,23 @@ MAX_AUTO_UNLOCK_ATTEMPTS = int(os.environ.get("SMARTBW_MAX_UNLOCK_ATTEMPTS", "3"
 # ============================================================================
 
 def _get_runtime_dir() -> Path:
-    """运行时配置目录。默认 ~/.config/bitwarden-mcp/，可通过 SMARTBW_CONFIG_DIR 覆盖。"""
-    custom = os.environ.get("SMARTBW_CONFIG_DIR", "")
-    if custom:
-        return Path(custom)
-    return Path.home() / ".config" / "bitwarden-mcp"
+    """运行时配置目录。默认 ~/.config/bitwarden-mcp/，可通过 SMARTBW_CONFIG_DIR 覆盖（支持 ~）。"""
+    return runtime_dir()
+
+
+def _resolve_runtime_dir() -> Path:
+    """解析运行时目录，并加载该目录的 .env。
+
+    SMARTBW_CONFIG_DIR 既可能来自真实环境变量，也可能写在默认目录的 .env 里，
+    因此做两趟：先按初值加载 .env；若其中把目标目录改了，再重算并加载新目录的 .env。
+    """
+    resolved = _get_runtime_dir()
+    _load_dotenv(resolved / ".env")
+    recheck = _get_runtime_dir()
+    if recheck != resolved:
+        resolved = recheck
+        _load_dotenv(resolved / ".env")
+    return resolved
 
 
 def _load_dotenv(dotenv_path: Path) -> None:
@@ -82,7 +96,7 @@ def _load_dotenv(dotenv_path: Path) -> None:
         pass
 
 
-_config_cache: Dict[str, str] = None  # type: ignore[assignment]
+_config_cache: Optional[Dict[str, str]] = None
 
 
 def get_config(refresh: bool = False) -> Dict[str, str]:
@@ -97,10 +111,8 @@ def get_config(refresh: bool = False) -> Dict[str, str]:
         return _config_cache
 
     config: Dict[str, str] = {}
-    runtime_dir = _get_runtime_dir()
-
-    # 1. .env 文件（运行时目录，可选）
-    _load_dotenv(runtime_dir / ".env")
+    # 1. .env 文件（运行时目录，可选）—— 同时解析 SMARTBW_CONFIG_DIR 的两趟语义
+    cfg_dir = _resolve_runtime_dir()
 
     # 2. 环境变量（优先级最高）
     config["bw_host"] = os.environ.get("BW_HOST", "")
@@ -115,21 +127,30 @@ def get_config(refresh: bool = False) -> Dict[str, str]:
     config["api_key"] = os.environ.get("BW_API_KEY", "")
 
     # 3. 配置文件（补充环境变量未设置的值）
-    config_file = runtime_dir / "config.json"
+    config_file = cfg_dir / "config.json"
     if config_file.exists():
         try:
             with open(config_file) as f:
                 file_config = json.load(f)
             # 启动时解密/加密 config.json 敏感字段
+            encrypted_prefix = "!enc:v1:"
             try:
-                from crypto_config import process_config_on_startup
+                from crypto_config import ENCRYPTED_PREFIX, process_config_on_startup
+                encrypted_prefix = ENCRYPTED_PREFIX
                 decrypted = process_config_on_startup()
                 if decrypted:
                     file_config.update(decrypted)
             except ImportError:
-                pass
+                pass  # 未安装 cryptography 时 config.json 不会存在密文
             # 补全模式: 只填充 config 中尚未设置的值
             for key, value in file_config.items():
+                # 解密失败的密文绝不能降级当明文使用（否则会被当成主密码去登录）
+                if isinstance(value, str) and value.startswith(encrypted_prefix):
+                    logger.error(
+                        "配置项 %s 仍为密文（解密失败），已跳过；请检查机器指纹是否变更，"
+                        "或执行 python3 -m mcp_daemon --reinit 重新初始化", key
+                    )
+                    continue
                 if key not in config or not config[key]:
                     config[key] = value
         except (json.JSONDecodeError, OSError):
@@ -198,7 +219,7 @@ def setup_logging():
     log_level = os.environ.get("LOG_LEVEL", "INFO")
     log_file = os.environ.get("LOG_FILE")
 
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    handlers: List[logging.Handler] = [logging.StreamHandler()]
     if log_file:
         try:
             handlers.append(logging.FileHandler(log_file))
