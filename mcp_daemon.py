@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -64,27 +65,42 @@ logger = logging.getLogger("mcp_daemon")
 _file_handler = None
 
 
+class _PrivateTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """轮转后新建的日志文件同样收紧到 0o600。
+
+    `_setup_file_logging()` 里那一次 `os.chmod` 覆盖不到 `doRollover() → _open()`
+    这条路径：轮转时新文件由 `open(path, "a")` 创建，权限只由 umask 决定。
+    daemon 是长期运行进程且每日轮转，不处理的话第二天起当前日志就退回 umask
+    默认（如 0o664）—— 目录虽已是 0o700、外部无法穿过，但仍属纵深防御缺口，
+    且与 README「日志文件 0o600」的声明不符。
+    """
+
+    def _open(self):
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except OSError:
+            pass  # 权限收紧非致命
+        return stream
+
+
 def _setup_file_logging():
     """初始化文件日志（每日轮转，保留 30 天）。仅 daemon 启动时调用。"""
     global _file_handler
     if _file_handler is not None:
         return  # 已初始化
     try:
-        from logging.handlers import TimedRotatingFileHandler
         # 显式收紧权限：不能依赖 umask（不同环境可能是 022/002，都会让同组可读）
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             os.chmod(LOG_FILE.parent, 0o700)  # mkdir 的 mode 对"已存在目录"无效
         except OSError:
             pass
-        _file_handler = TimedRotatingFileHandler(
+        # 构造与轮转都会经由 _PrivateTimedRotatingFileHandler._open() 落到 0o600
+        _file_handler = _PrivateTimedRotatingFileHandler(
             str(LOG_FILE), when='midnight', interval=1, backupCount=30,
             encoding='utf-8'
         )
-        try:
-            os.chmod(str(LOG_FILE), 0o600)  # FileHandler 构造时已创建文件
-        except OSError:
-            pass
         _file_handler.setFormatter(logging.Formatter(
             '%(asctime)s [daemon] %(levelname)s %(message)s'
         ))

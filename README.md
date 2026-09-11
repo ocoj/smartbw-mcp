@@ -113,7 +113,7 @@ python3 mcp_daemon.py
 ## 安全
 
 - Unix Socket 权限 `0o600`（umask + chmod 双重保护）
-- 日志目录 `0o700` / 日志文件 `0o600`，日志中的账号以掩码记录
+- 日志目录 `0o700` / 日志文件 `0o600`（**含每日轮转后新建的当前日志**），日志中的账号以掩码记录
 - 密码/API Key 由 Vaultwarden 托管，本地仅按需读取
 - 配置文件中的敏感字段自动加密（`!enc:v1:...`），含 `master_password` / `client_secret` / `api_key`
 - **加密密钥绑定本机**，配置文件不可跨机器复制

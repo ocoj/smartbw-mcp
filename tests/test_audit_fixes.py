@@ -14,6 +14,7 @@
 - P1-13        `_resolve_search` 的多结果/自动选取/index 语义
 """
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -343,3 +344,37 @@ def test_reinit_marker_cleared_when_it_belongs_to_us(monkeypatch, tmp_path):
 
     crypto_config.process_config_on_startup()
     assert not marker.exists()
+
+
+# ============================================================================
+# P1-4 残留缺口：日志轮转后新建文件必须保持 0o600
+# （由第三方复核报告 AUDIT_REVIEW_v2.3.2.md §2 提出）
+# ============================================================================
+
+def test_rotated_log_file_stays_private(tmp_path):
+    """轮转后新建的当前日志必须仍是 0o600，不得回落 umask（如 0o664）。"""
+    import mcp_daemon
+
+    log = tmp_path / "daemon.log"
+    handler = mcp_daemon._PrivateTimedRotatingFileHandler(
+        str(log), when="S", interval=1, backupCount=1
+    )
+    lg = logging.getLogger("rotate-test")
+    lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+    try:
+        lg.info("before rollover")
+        handler.doRollover()
+        lg.info("after rollover")
+
+        assert (log.stat().st_mode & 0o777) == 0o600, \
+            f"轮转后当前日志权限应为 0o600，实际 {oct(log.stat().st_mode & 0o777)}"
+
+        backups = [p for p in tmp_path.iterdir() if p != log]
+        assert backups, "轮转应产生 backup 文件"
+        for b in backups:
+            assert (b.stat().st_mode & 0o777) == 0o600, \
+                f"backup {b.name} 权限应为 0o600，实际 {oct(b.stat().st_mode & 0o777)}"
+    finally:
+        handler.close()
+        lg.removeHandler(handler)

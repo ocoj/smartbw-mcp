@@ -1,5 +1,24 @@
 # 变更日志
 
+## [2.3.3] - 2026-09-11
+
+> 依据第三方复核报告 `docs/dev/AUDIT_REVIEW_v2.3.2.md`（复核对象 v2.3.2 / `eb94fd1`）的收尾修复。
+
+### 🔧 修复
+
+- **日志权限在轮转后失效（复核报告 §2，P1-4 残留缺口）**: `_setup_file_logging()` 的 `os.chmod(log, 0o600)` 只覆盖初始化那一刻；`TimedRotatingFileHandler.doRollover() → _open()` 走的 `open(path, "a")` 由 umask 决定权限，因此**每日轮转后新建的当前日志会回落 `0o664`**（父目录仍是 `0o700`，外部用户无法穿过，故无实际暴露，但属纵深防御缺口且与 README 声明不符）。新增 `_PrivateTimedRotatingFileHandler`，在 `_open()` 中统一收紧到 `0o600`（初始化与轮转两条路径都覆盖）
+- 新增回归测试 `test_rotated_log_file_stays_private`（断言轮转后当前日志与 backup 均为 `0o600`）；README 日志权限声明补充"含轮转后新建"
+
+### 📋 复核意见处理
+
+| 复核意见 | 处理 |
+|---------|------|
+| §0.1 P1-3「部分修复」 | ✅ 已修复（本版） |
+| §4.1 熔断语义可能过宽 | 保持现状（`_with_circuit` 计通用异常是 R3 报告的明确建议，且已由 `test_circuit_counts_generic_exception` 固化）；是否细分"业务错误/连接错误"属产品决策，暂不改动 |
+| §4.2 CI 尚未真实运行 | 待推送后由 GitHub Actions 验证（本地无法代跑） |
+| §4.3 py3.8 未实证 | 本机补测 **Python 3.12.13**：`48 passed / 2 skipped`、覆盖率 34%（与 3.10 一致）；3.8 解释器本机不存在，改由 `ruff target-version = "py38"` + CI matrix 兜底 |
+| §4.4 覆盖率门槛偏松 | 暂保留 30（当前 34%）；`smartbw_mcp_server.py` 工具层补测列为后续事项 |
+
 ## [2.3.2] - 2026-09-11
 
 > 依据 v2.3.1 第三方审计报告（`docs/dev/AUDIT_REPORT_v2.3.1.md`，R3）的修复提交。
