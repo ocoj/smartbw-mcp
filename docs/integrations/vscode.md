@@ -47,7 +47,7 @@ VS Code 1.129 起，MCP server 配置**已从 `settings.json` 迁移到 profile 
 ## 生效与验证
 
 1. 编辑保存 `mcp.json` 后，`Ctrl+Shift+P` → `Developer: Reload Window` 重新加载窗口
-2. 验证 MCP server 握手：应看到 `smartbw` 连接成功（v2.3.4，8 个工具齐全）
+2. 验证 MCP server 握手：应看到 `smartbw` 连接成功（v2.3.6，8 个工具齐全）
 3. 在 Chat 中测试：
 
    ```text

@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from config import DEFAULT_TIMEOUT, get_config, logger
 from models import BwConnectionError, BwTimeoutError, LockedError
 
+# 连不上 daemon 时，先等这么久再考虑拉起新实例（覆盖 systemd/部署重启窗口，
+# 避免在窗口期造出第二个 daemon；测试可用 SMARTBW_DAEMON_WAIT=0 关闭等待）。
+DAEMON_WAIT_SECONDS = float(os.environ.get("SMARTBW_DAEMON_WAIT", "5") or 0)
+
 if TYPE_CHECKING:
     from mcp_daemon import DaemonClient
 
@@ -91,14 +95,39 @@ class RealMCPClient:
     # ─── 连接管理 ──────────────────────────
 
     def start(self) -> bool:
-        """连接守护进程"""
+        """连接守护进程；必要时拉起它。
+
+        拉起前有两道保护，避免在"重启窗口"里造出第二个 daemon
+        （两个进程同时 LISTEN 同一 socket、PID 文件被后者抢占）：
+        1. **宽限期等待**：连接失败后先反复重试一段时间 —— systemd/部署重启的
+           窗口很短，等一等就好，不必新起进程；
+        2. **拉起前确认**：`PID 文件指向的进程已不存在`才允许 spawn；只要还有活的
+           守护进程（哪怕 socket 尚未就绪）就选择等待，交由 `mcp_daemon` 的排他锁
+           与 bind 前探测兜底。
+        """
         if self._daemon_client.is_connected():
             return True
         if self._daemon_client.connect():
             logger.info("已连接守护进程")
             return True
 
-        logger.warning("守护进程未运行，尝试启动...")
+        # 1) 宽限期：等待 daemon 自行就绪（重启窗口）
+        if DAEMON_WAIT_SECONDS > 0:
+            logger.warning("未连上守护进程，等待其就绪（最多 %.1fs）...", DAEMON_WAIT_SECONDS)
+            deadline = time.time() + DAEMON_WAIT_SECONDS
+            while time.time() < deadline:
+                time.sleep(0.5)
+                if self._daemon_client.connect():
+                    logger.info("守护进程已就绪并连接（等待生效）")
+                    return True
+
+        # 2) 仍连不上：只有确认"没有活着的守护进程"才拉起新实例
+        if self._daemon_process_exists():
+            logger.error("检测到守护进程进程存在但连接不可用（可能仍在启动），"
+                         "不再拉起第二个实例")
+            return False
+
+        logger.warning("确认无守护进程在运行，尝试启动...")
         try:
             subprocess.Popen(
                 [sys.executable, os.path.join(os.path.dirname(__file__), "mcp_daemon.py"), "--daemon"],
@@ -113,6 +142,18 @@ class RealMCPClient:
         except Exception as e:
             logger.error(f"自动启动守护进程失败: {e}")
         return False
+
+    @staticmethod
+    def _daemon_process_exists() -> bool:
+        """PID 文件是否指向一个活着的守护进程（socket 未就绪也算）。"""
+        try:
+            from mcp_daemon import _daemon_process_exists as _exists
+        except ImportError:
+            return False
+        try:
+            return bool(_exists())
+        except Exception:  # noqa: BLE001 - 判定失败不该阻断启动流程
+            return False
 
     def ping(self) -> bool:
         """健康检查"""

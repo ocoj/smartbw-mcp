@@ -38,6 +38,11 @@ from typing import Dict, Optional
 
 from paths import socket_path, state_dir
 
+try:  # pragma: no cover - Windows 无 fcntl；本守护进程依赖 AF_UNIX，本身不支持 Windows
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
 # 导入自定义异常（与 mcp_raw.py 使用的类型一致）。
 # 切勿用内置名 TimeoutError / ConnectionError 作别名 —— 那会遮蔽内置异常，
 # 让 `except ConnectionError` 漏捕 OSError 子类。
@@ -55,6 +60,8 @@ except ImportError:  # pragma: no cover - models.py 与本模块同目录，正�
 SOCKET_PATH = socket_path()
 PID_FILE = state_dir() / "daemon.pid"
 LOG_FILE = state_dir() / "daemon.log"
+# 排他锁文件：保证同一时刻只有一个守护进程在启动（见 _acquire_daemon_lock）
+LOCK_FILE = state_dir() / "daemon.lock"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -395,6 +402,26 @@ class MCPServerManager:
 # === Unix Socket 服务器 ===
 
 
+def _socket_is_live(path: Path, timeout: float = 0.5) -> bool:
+    """`path` 上是否有**活着的**守护进程在监听。
+
+    connect 成功 ⇒ 有监听者；ECONNREFUSED / ENOENT 等 ⇒ 陈旧文件或根本不存在。
+    用于区分"陈旧 socket 文件（可安全 unlink）"与"别的实例正在监听（不可抢）"。
+    """
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(timeout)
+        probe.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.close()
+        except OSError:
+            pass
+
+
 class DaemonServer:
     """Unix socket 服务器，接收客户端连接并代理请求"""
 
@@ -406,12 +433,34 @@ class DaemonServer:
         self._cleaned = False  # cleanup() 幂等守卫（_shutdown 与 atexit 都会调）
         self._clients = []
 
-    def start(self):
+    def start(self) -> Optional[bool]:
+        """启动服务器并进入事件循环。
+
+        返回值：`False` 表示**主动放弃启动**（socket 路径上已有活的守护进程）；
+        正常生命周期（进入 `_run_loop()` 直到关闭）返回 None。
+        """
         SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        # 清理旧 socket
+        # 清理旧 socket —— 但绝不盲目 unlink：先探测该路径上是否已有**活着的**
+        # 守护进程在监听。unlink + bind 会把 socket 路径从正在运行的实例手里抢走，
+        # 造成"两个 daemon 各自 LISTEN、PID 文件被后者抢占、systemd 管的那只变成
+        # 谁都连不上的孤儿"的分裂状态（实测复现）。
         if SOCKET_PATH.exists():
-            SOCKET_PATH.unlink()
+            if _socket_is_live(SOCKET_PATH):
+                logger.error(
+                    "[EVENT] daemon_start_aborted: %s 上已有守护进程在监听，本实例放弃启动",
+                    SOCKET_PATH)
+                return False
+            logger.warning("清理陈旧 socket（无监听者）: %s", SOCKET_PATH)
+            try:
+                SOCKET_PATH.unlink()
+            except OSError as e:
+                logger.warning("删除陈旧 socket 失败（继续尝试 bind）: %s", e)
+
+        # 先写 PID 再 bind：客户端据此判定"daemon 正在启动/已运行"从而选择等待；
+        # 否则"进程已起、PID 文件未写"的窗口里，每个客户端都会再拉起一个实例。
+        PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PID_FILE.write_text(str(os.getpid()))
 
         self.server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
@@ -419,6 +468,14 @@ class DaemonServer:
         old_umask = os.umask(0o077)
         try:
             self.server_sock.bind(str(SOCKET_PATH))
+        except OSError:
+            # bind 失败：撤掉刚写的 PID，避免留下"看似在运行"的假象
+            try:
+                if PID_FILE.exists() and PID_FILE.read_text().strip() == str(os.getpid()):
+                    PID_FILE.unlink()
+            except OSError:
+                pass
+            raise
         finally:
             os.umask(old_umask)
 
@@ -627,6 +684,7 @@ class DaemonServer:
             SOCKET_PATH.unlink()
         if PID_FILE.exists():
             PID_FILE.unlink()
+        _release_daemon_lock()
         logger.info("守护进程已停止")
 
 
@@ -724,6 +782,77 @@ class DaemonClient:
 # === CLI ===
 
 
+def _pid_alive(pid: int) -> bool:
+    """进程是否存在（不判定其身份）。"""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _daemon_process_exists() -> bool:
+    """PID 文件是否指向一个**活着的**守护进程（不要求 socket 已就绪）。
+
+    与 `_is_daemon_running()` 的区别：后者还要求 socket 存在，因此在"进程已起、
+    socket 尚未 bind"的启动窗口里会返回 False。客户端必须用本函数判断"该等"还是
+    "该拉起" —— 若用 `_is_daemon_running()`，窗口期每次请求都会再拉起一个实例。
+
+    无法校验身份时（非 Linux）保守返回 True，宁可等待也不冒双实例风险。
+    """
+    if not PID_FILE.exists():
+        return False
+    try:
+        pid = int(PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if not _pid_alive(pid):
+        return False
+    return _pid_is_daemon(pid) is not False
+
+
+# 排他锁：进程存活期间持有（fd 关闭即释放，fork 后子进程共享同一 open file
+# description，故父进程退出后锁仍由子进程持有）。
+_DAEMON_LOCK_FD: Optional[int] = None
+
+
+def _acquire_daemon_lock() -> bool:
+    """获取守护进程启动的排他锁；已被占用时返回 False。
+
+    存在的意义：重启窗口内（systemd restart / 部署重启）多个客户端可能同时判定
+    "daemon 未运行"并各自拉起一个 —— 那会造成两个进程监听同一 socket、PID 文件
+    被后者抢占。锁把"检查 + 启动"变成互斥操作。
+    """
+    global _DAEMON_LOCK_FD
+    if fcntl is None:  # pragma: no cover - 非 Unix
+        return True
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        logger.warning("无法创建锁文件 %s（退化为无锁）: %s", LOCK_FILE, e)
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    _DAEMON_LOCK_FD = fd
+    return True
+
+
+def _release_daemon_lock():
+    """释放排他锁（关闭时调用；异常路径下进程退出也会自动释放）。"""
+    global _DAEMON_LOCK_FD
+    if _DAEMON_LOCK_FD is None:
+        return
+    try:
+        os.close(_DAEMON_LOCK_FD)
+    except OSError:
+        pass
+    _DAEMON_LOCK_FD = None
+
+
 def _is_daemon_running():
     if not PID_FILE.exists():
         return False
@@ -766,8 +895,16 @@ def _stop_daemon():
 
 
 def _start_daemon(foreground=False):
-    if _is_daemon_running():
+    # "检查 + 启动"必须是互斥操作：重启窗口内多个客户端可能同时走到这里，
+    # 各自 fork 出一个 daemon（实测：两个进程同时 LISTEN 同一 socket，PID 文件被抢）。
+    if not _acquire_daemon_lock():
+        print("另一个守护进程正在启动或已在运行（排他锁被占用），本次启动放弃")
+        sys.exit(1)
+
+    # 拿到锁后**复查**：等锁期间可能有实例已经完成启动
+    if _daemon_process_exists():
         print("守护进程已在运行")
+        _release_daemon_lock()
         sys.exit(1)
 
     if not foreground:
@@ -775,13 +912,17 @@ def _start_daemon(foreground=False):
         pid = os.fork()
         if pid > 0:
             print(f"守护进程已启动 (PID {pid})")
-            sys.exit(0)
+            sys.exit(0)   # 锁 fd 由共享同一 open file description 的子进程持有
         os.setsid()
 
     _setup_file_logging()
     session = _ensure_logged_in_and_unlocked()
     server = DaemonServer(session)
-    server.start()
+    if server.start() is False:
+        # 主动放弃（例如 socket 上已有别的实例在监听）
+        logger.error("守护进程启动被放弃（已有实例在监听），退出")
+        _release_daemon_lock()
+        sys.exit(1)
 
 
 def main():

@@ -1,5 +1,29 @@
 # 变更日志
 
+## [2.3.6] - 2026-09-11
+
+> 修复会话巡检中实测发现的 **daemon 双实例竞态**（既有缺陷，非 2.3.2~2.3.5 引入）。
+> 注：2.3.5 为复核 E-3 的快照代际清理（仅 `CHANGELOG` + `smart_search.py`），未同步版本字段；版本字段自此推进到 2.3.6。
+
+### 🔴 修复
+
+- **重启窗口期出现两个 daemon 同时监听同一 socket**: 实测现象为两个 `mcp_daemon.py` 进程各自 `LISTEN` 同一 socket 路径（inode 不同）、`daemon.pid` 被**自动拉起的野实例**（PPID=1、`--daemon`）抢占、systemd 管理的那只变成**谁都连不上的孤儿**。
+  成因三重：
+  1. `RealMCPClient.start()` 连接失败即盲目 `Popen(mcp_daemon.py --daemon)`，对"对方正在重启"零容忍；
+  2. `DaemonServer.start()` **无条件** `unlink()` 旧 socket 再 `bind()` —— 会把 socket 路径从正在运行的实例手里抢走；
+  3. `_is_daemon_running()` 同时要求 PID 存活 **且** socket 存在，启动窗口内恒为 False；而 PID 文件原本在 bind **之后**才写，窗口被进一步放大。
+
+  四层防护：
+  - **bind 前探测**：新增 `_socket_is_live()`，连得上即说明已有实例在监听 ⇒ 本实例**放弃启动**（`start()` 返回 `False`）且不 unlink；连不上才按陈旧文件清理；
+  - **PID 先写**：PID 文件改到 `bind` 之前写入（bind 失败则撤回），使客户端能观察到"启动中"；
+  - **启动排他锁**：新增 `_acquire_daemon_lock()`（`fcntl.flock` on `daemon.lock`，`0600`），把"检查 + 启动"变为互斥操作；锁 fd 跨 `fork` 由子进程持有，退出即释放；`cleanup()` 显式释放；
+  - **客户端宽限等待**：连不上先重试 `SMARTBW_DAEMON_WAIT`（默认 5s，`0` 可关闭）再考虑拉起；且仅当 `_daemon_process_exists()`（PID 存活且身份为守护进程，**不要求 socket 已就绪**）为假时才 spawn。
+
+### 🧪 测试
+
+- 新增 7 项：socket 存活探测（监听者 / 陈旧文件 / 不存在）、排他锁互斥性与锁文件 `0600`、**已有实例监听时放弃启动且不抢 socket、不写 PID**、客户端"有 daemon 进程则不 spawn"/"无 daemon 进程则 spawn 一次"、`_daemon_process_exists()` 对陈旧/非法/身份不明 PID 的判定
+- 真机验证：新代码部署并重启后，重复/并发执行 `mcp_daemon.py --daemon` 均被拒绝，socket 监听者恒为 1，`daemon.pid` 未被篡改；live 套件 2 passed
+
 ## [2.3.5] - 2026-09-11
 
 > 依据第三方复核报告（内部文档）E-3 项：模糊搜索内部的快照代际冗余清理，无用户可见行为变化。

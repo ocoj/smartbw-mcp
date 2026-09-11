@@ -418,3 +418,175 @@ def test_rotated_log_file_stays_private(tmp_path):
     finally:
         handler.close()
         lg.removeHandler(handler)
+
+
+# ============================================================================
+# daemon 双实例竞态（重启窗口）
+#
+# 实测事故：systemd 重启 daemon 的窗口内，客户端连接失败后盲目 Popen 拉起新实例，
+# 而 DaemonServer.start() 无条件 unlink+bind ⇒ 两个进程同时 LISTEN 同一 socket、
+# PID 文件被野实例抢占、systemd 管的那只变成谁都连不上的孤儿。
+# 三层防护：bind 前探测 / 启动排他锁 / 客户端宽限等待。
+# ============================================================================
+
+def test_socket_is_live_distinguishes_listener_from_stale(tmp_path):
+    """`_socket_is_live` 必须区分"有监听者"与"陈旧文件"。"""
+    import socket as _socket
+
+    import mcp_daemon
+
+    assert mcp_daemon._socket_is_live(tmp_path / "missing.sock") is False
+
+    stale = tmp_path / "stale.sock"
+    stale.write_text("")
+    assert mcp_daemon._socket_is_live(stale) is False
+
+    live = tmp_path / "live.sock"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        srv.bind(str(live))
+        srv.listen(1)
+        assert mcp_daemon._socket_is_live(live) is True
+    finally:
+        srv.close()
+    # 监听者关闭后，文件仍在但已无监听 ⇒ 属于可安全清理的陈旧 socket
+    assert live.exists()
+    assert mcp_daemon._socket_is_live(live) is False
+
+
+def test_daemon_lock_is_exclusive(monkeypatch, tmp_path):
+    """启动排他锁：同一时刻只有一个持有者（第二次获取必须失败）。"""
+    import mcp_daemon
+
+    if mcp_daemon.fcntl is None:  # pragma: no cover - 非 Unix
+        pytest.skip("平台无 fcntl")
+
+    lock = tmp_path / "daemon.lock"
+    monkeypatch.setattr(mcp_daemon, "LOCK_FILE", lock)
+    monkeypatch.setattr(mcp_daemon, "_DAEMON_LOCK_FD", None)
+    try:
+        assert mcp_daemon._acquire_daemon_lock() is True
+        assert (lock.stat().st_mode & 0o777) == 0o600, "锁文件权限应为 0o600"
+        # 同一进程另开 fd 再锁同样应被拒（flock 按 open file description 计）
+        assert mcp_daemon._acquire_daemon_lock() is False
+        mcp_daemon._release_daemon_lock()
+        assert mcp_daemon._acquire_daemon_lock() is True
+    finally:
+        mcp_daemon._release_daemon_lock()
+
+
+def test_daemon_server_aborts_instead_of_hijacking_socket(monkeypatch, tmp_path):
+    """已有实例在监听时，新实例必须放弃启动，且**不得**抢走 socket 或写 PID。"""
+    import socket as _socket
+
+    import mcp_daemon
+
+    class _DummyMCP:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            return True
+
+        def stop(self):
+            pass
+
+    sock_path = tmp_path / "daemon.sock"
+    pid_file = tmp_path / "daemon.pid"
+    srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    srv.listen(1)
+    try:
+        monkeypatch.setattr(mcp_daemon, "SOCKET_PATH", sock_path)
+        monkeypatch.setattr(mcp_daemon, "PID_FILE", pid_file)
+        monkeypatch.setattr(mcp_daemon, "MCPServerManager", _DummyMCP)
+
+        server = mcp_daemon.DaemonServer("dummy-session")
+        assert server.start() is False, "应主动放弃启动"
+
+        assert sock_path.exists(), "不得 unlink 别人的 socket"
+        assert mcp_daemon._socket_is_live(sock_path) is True, "原监听者必须仍然可用"
+        assert not pid_file.exists(), "放弃启动时不得留下 PID 文件"
+    finally:
+        srv.close()
+
+
+class _UnconnectableDaemonClient:
+    """`connect()` 永远失败的假 daemon 客户端。"""
+
+    def __init__(self):
+        self.connect_calls = 0
+
+    def is_connected(self):
+        return False
+
+    def connect(self):
+        self.connect_calls += 1
+        return False
+
+
+def _make_bare_client():
+    """构造不带真实依赖的 RealMCPClient（跳过会取配置/建连接的 __init__）。"""
+    import mcp_raw
+
+    client = mcp_raw.RealMCPClient.__new__(mcp_raw.RealMCPClient)
+    client._daemon_client = _UnconnectableDaemonClient()
+    return client
+
+
+def test_client_does_not_spawn_when_daemon_process_exists(monkeypatch):
+    """PID 文件指向活着的 daemon 时（哪怕 socket 未就绪），客户端只能等，不得再拉起。"""
+    import mcp_raw
+
+    monkeypatch.setattr(mcp_raw, "DAEMON_WAIT_SECONDS", 0)
+    monkeypatch.setattr(mcp_raw.RealMCPClient, "_daemon_process_exists",
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(mcp_raw.time, "sleep", lambda *_: None)
+    spawned = []
+    monkeypatch.setattr(mcp_raw.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or None)
+
+    assert _make_bare_client().start() is False
+    assert spawned == [], "已有 daemon 进程时不得 spawn 第二个实例"
+
+
+def test_client_spawns_when_no_daemon_process(monkeypatch):
+    """确认无 daemon 进程时仍会自动拉起（不能把正常自愈路径改坏）。"""
+    import mcp_raw
+
+    monkeypatch.setattr(mcp_raw, "DAEMON_WAIT_SECONDS", 0)
+    monkeypatch.setattr(mcp_raw.RealMCPClient, "_daemon_process_exists",
+                        staticmethod(lambda: False))
+    monkeypatch.setattr(mcp_raw.time, "sleep", lambda *_: None)
+    spawned = []
+    monkeypatch.setattr(mcp_raw.subprocess, "Popen",
+                        lambda *a, **k: spawned.append(a) or None)
+
+    assert _make_bare_client().start() is False   # 拉起后仍连不上
+    assert len(spawned) == 1, "确认无 daemon 时应自动拉起一次"
+
+
+def test_daemon_process_exists_ignores_stale_pid(monkeypatch, tmp_path):
+    """陈旧 PID 文件（进程已不存在 / 不是 daemon）不得被当成"有 daemon"。"""
+    import mcp_daemon
+
+    pid_file = tmp_path / "daemon.pid"
+    monkeypatch.setattr(mcp_daemon, "PID_FILE", pid_file)
+
+    assert mcp_daemon._daemon_process_exists() is False        # 文件不存在
+
+    pid_file.write_text("not-a-pid")
+    assert mcp_daemon._daemon_process_exists() is False        # 内容非法
+
+    # 一个绝不可能存在的 PID
+    pid_file.write_text("4194304")
+    assert mcp_daemon._daemon_process_exists() is False
+
+    # 活着的 pid，但身份不是守护进程（当前测试进程）→ 不作为"有 daemon"
+    pid_file.write_text(str(os.getpid()))
+    monkeypatch.setattr(mcp_daemon, "_pid_is_daemon", lambda pid: False)
+    assert mcp_daemon._daemon_process_exists() is False
+
+    # 身份无法判定（非 Linux）时保守视为"有 daemon"，宁可等待
+    monkeypatch.setattr(mcp_daemon, "_pid_is_daemon", lambda pid: None)
+    assert mcp_daemon._daemon_process_exists() is True
