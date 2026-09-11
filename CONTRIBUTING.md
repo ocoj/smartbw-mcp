@@ -58,6 +58,37 @@ SMARTBW_LIVE_TEST=1 pytest tests/test_cache_live.py -v
 - `CHANGELOG.md` → `## [X.Y.Z]`
 - 保持代码风格与现有一致（Python 3.8+，4 空格缩进）
 
+### 一键同步（不要手改三处）
+
+```bash
+bash scripts/bump-version.sh --auto     # 依据 conventional commits 自动推导版本
+bash scripts/bump-version.sh 2.4.0      # 或显式指定
+```
+
+`--auto` 自最新 tag 统计提交并推导级别（`BREAKING`/`!` → major、`feat` → minor、
+其余 → patch），同步上述三处，并生成**按类型分组的 CHANGELOG 骨架**（逐条列出提交
+主题，细节仍需人工补全）。若检测到"已 bump 但尚未发版"，它会拒绝再次递增。
+
+### 发版流程
+
+1. `bash scripts/bump-version.sh --auto` —— 推导版本 + 生成 CHANGELOG 骨架
+2. 补全 CHANGELOG 正文（说明**为什么**改、如何验证）
+3. `git add -A && git commit -m "release: X.Y.Z ..."` 并推送到 `main`
+4. **CI 自动收尾**：`.github/workflows/release.yml` 读取 `pyproject.toml` 版本，
+   校验三处一致后，若对应 tag 不存在则**自动打注解 tag + 从 CHANGELOG 提取发行说明
+   创建 GitHub Release**（已存在则跳过，幂等 —— 因此每次 push 都跑也无副作用）
+
+### 推送前审计
+
+```bash
+bash scripts/pre-push-audit.sh              # 对比 origin/main
+bash scripts/pre-push-audit.sh --range v2.3.7   # 指定基线
+```
+
+比 `pre-commit` 覆盖更广：全量跟踪文件内容、**待推送提交的新增行**、提交作者邮箱、
+不应被跟踪的文件、tag 注解。命中时**只打印「文件:行号」不打印内容**，避免审计本身
+造成二次泄露。
+
 ## 安全提醒
 
 - **绝不要**在代码、文档、commit message 中写入真实密码、域名或 IP

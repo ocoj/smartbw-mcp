@@ -2,6 +2,7 @@
 
 > Vaultwarden/Bitwarden MCP 代理 — 让 AI 安全获取密码和 API Key
 
+[![Version](https://img.shields.io/github/v/release/ocoj/smartbw-mcp?label=version&color=blue)](https://github.com/ocoj/smartbw-mcp/releases)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-green)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
@@ -18,11 +19,17 @@ smart_search.py                    ← 智能搜索层（6 策略模糊搜索 + 
         │
 mcp_raw.py                         ← 通信层（JSON-RPC + 熔断保护）
         │
-mcp_daemon.py                      ← 守护进程层（Unix Socket 常驻 + 自愈）
+mcp_daemon.py                      ← 守护进程层（Unix Socket 常驻 + 自愈 + 单实例保护）
         │
 @bitwarden/mcp-server (Node.js)    ← 协议层（Bitwarden 官方 MCP Server）
         │
 Vaultwarden 服务器                  ← 数据层
+```
+
+```
+paths.py                           ← 横切：统一运行时路径（配置目录 / 运行状态目录）
+config.py · crypto_config.py · unlock.py · models.py
+                                   ← 支撑：配置加载 / 凭证加密 / 自动解锁 / 数据类型
 ```
 
 ---

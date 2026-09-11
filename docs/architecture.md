@@ -63,6 +63,22 @@ Vaultwarden 服务器          → 密码存储
 2. MCP Server 处理完当前请求后检测到 → `exit(0)`
 3. AI 客户端发现 stdio 关闭 → 自动 spawn 新进程加载新代码
 
+### 守护进程单实例
+
+同一时刻只允许一个 `mcp_daemon` 监听 socket —— 否则两个进程会各自 `LISTEN` 同一
+路径（inode 不同），PID 文件被后者抢占，先启动的那只变成**谁都连不上的孤儿**。
+四层防护：
+
+| 层 | 机制 |
+|----|------|
+| **bind 前探测** | `_socket_is_live()` 先试连：连得上 ⇒ 已有实例在监听 ⇒ 本实例**放弃启动**且不 unlink；仅 `ECONNREFUSED` / `ENOENT` / `ENOTDIR` 才判为陈旧文件可清理。**无法判定**（`EAGAIN` 队列满、超时）一律保守视为存活，绝不抢 socket |
+| **PID 前置** | PID 文件改到 `bind` **之前**写入（bind 失败则撤回），使客户端能观察到"启动中" |
+| **启动排他锁** | `fcntl.flock` 锁 `daemon.lock`（`0600`），把"检查 + 启动"变为互斥操作；锁 fd 跨 `fork` 由子进程持有，退出即释放 |
+| **客户端宽限** | 连不上先重试 `SMARTBW_DAEMON_WAIT`（默认 5s，`0` 关闭）再考虑拉起；且仅当 `_daemon_process_exists()`（PID 存活且身份为守护进程，**不要求 socket 已就绪**）为假时才 spawn |
+
+socket 路径可由 `SMARTBW_SOCKET_PATH` 单独覆盖（默认 `~/.smartbw-mcp/daemon.sock`），
+便于"隔离 HOME 但连真实 daemon"（如真机测试）。
+
 ### 凭证加密
 
 ```
@@ -111,9 +127,9 @@ TTL 15 秒（`SMARTBW_CACHE_TTL`）。**没有任何定时器** —— 只有查
 | `smartbw_mcp_server.py` | MCP 工具注册 + 请求分发 | `_get_client_ctx()`, `_resolve_search()` |
 | `smart_search.py` | 智能模糊搜索 + 长驻缓存/刷新策略 | `SmartBitwardenMCP`, `_fuzzy_score()`, `_fetch_items()` |
 | `mcp_raw.py` | JSON-RPC 通信 + 熔断 | `RealMCPClient`, `_with_circuit()` |
-| `mcp_daemon.py` | Unix Socket + 子进程管理 | `DaemonServer`, `MCPServerManager` |
+| `mcp_daemon.py` | Unix Socket + 子进程管理 + 单实例保护 | `DaemonServer`, `MCPServerManager`, `_socket_is_live()`, `_acquire_daemon_lock()` |
 | `unlock.py` | bw CLI 自动登录/解锁 | `auto_unlock()` |
 | `crypto_config.py` | 凭证加密/解密（`master_password` / `client_secret` / `api_key`） | `process_config_on_startup()` |
-| `paths.py` | 统一运行时路径解析（`SMARTBW_CONFIG_DIR`，支持 `~`） | `runtime_dir()`, `config_path()`, `env_path()` |
+| `paths.py` | 统一运行时路径解析：**配置目录 + 运行状态目录**（`SMARTBW_CONFIG_DIR` 支持 `~`；socket 可被 `SMARTBW_SOCKET_PATH` 覆盖） | `runtime_dir()`, `config_path()`, `env_path()`, `state_dir()`, `socket_path()` |
 | `config.py` | 配置加载 + 路径发现 | `get_config()`, `_find_mcp_path()` |
 | `models.py` | 数据类型与异常 | `BwItem`, `SearchResult`, `BwTimeoutError` |
