@@ -6,6 +6,12 @@ name: Release
 # bump（可用 scripts/bump-version.sh 一键同步三处）。
 #
 # 幂等：tag 已存在则整个 job 跳过，因此每次 push 都跑也无副作用。
+#
+# 权限说明：本工作流**显式**声明 `contents: write`。这是创建 tag 与 Release 的必要条件，
+# 且显式声明会覆盖仓库 Settings → Actions → Workflow permissions 的默认值（该默认值只
+# 对「未声明 permissions」的 workflow 生效）。所以**无需**把仓库默认权限放宽为
+# read and write —— 保持默认只读更安全。本仓库为个人账号，不存在组织级策略限制。
+# 若将来权限报 403（Resource not accessible），先查此处是否被改动，再查仓库设置。
 
 on:
   push:

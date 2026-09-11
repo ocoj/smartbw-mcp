@@ -2,9 +2,12 @@
 
 > Vaultwarden/Bitwarden MCP 代理 — 让 AI 安全获取密码和 API Key
 
+[![CI](https://github.com/ocoj/smartbw-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ocoj/smartbw-mcp/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/github/v/release/ocoj/smartbw-mcp?label=version&color=blue)](https://github.com/ocoj/smartbw-mcp/releases)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-green)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-122%20passed-brightgreen)](https://github.com/ocoj/smartbw-mcp/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-47%25-yellow)](https://github.com/ocoj/smartbw-mcp/actions/workflows/ci.yml)
 
 SmartBW MCP 是一个 MCP (Model Context Protocol) 工具服务器，让 AI Agent 通过标准 MCP 接口安全访问你的 Vaultwarden/Bitwarden 密码库。
 
@@ -149,6 +152,33 @@ python3 mcp_daemon.py
 | 自动解锁重试次数 | `SMARTBW_MAX_UNLOCK_ATTEMPTS` | 默认 3 |
 | CLI 超时（status/login/unlock/discovery） | `SMARTBW_CLI_STATUS_TIMEOUT` / `SMARTBW_CLI_LOGIN_TIMEOUT` / `SMARTBW_CLI_UNLOCK_TIMEOUT` / `SMARTBW_CLI_DISCOVERY_TIMEOUT` | 默认 10 / 15 / 15 / 10s |
 | 日志级别 / 日志文件 | `LOG_LEVEL` / `LOG_FILE` | `LOG_LEVEL` 影响 MCP server（默认 `INFO`）与 `python3 config.py`；守护进程固定 `INFO`。`LOG_FILE` 仅 `python3 config.py` 生效 |
+
+---
+
+## 开发与测试
+
+```bash
+pip install -e ".[dev]"     # pytest / pytest-cov / ruff / black
+
+python -m ruff check .                                   # lint（CI 阻断项）
+python -m pytest -q --cov=. --cov-report=term-missing --cov-fail-under=40
+```
+
+| 项目 | 当前状态 |
+|------|----------|
+| 测试 | 122 项通过、2 项跳过 |
+| 覆盖率 | 47%（CI 门槛 40%，低于则构建失败） |
+| Lint | `ruff check` 全绿（CI 阻断项） |
+| CI 矩阵 | Python 3.8 / 3.10 / 3.12 + wheel 打包内容校验 |
+
+测试默认**完全隔离**：`tests/conftest.py` 会把 `HOME` 与 `SMARTBW_CONFIG_DIR` 指向临时目录，
+不读写你的真实配置。只有显式设置 `SMARTBW_LIVE_TEST=1` 的用例才连接真实 daemon，
+其余需要真机的用例自动跳过。
+
+顶部 Tests / Coverage 徽章为静态值，与上表同源，发版时同步更新。
+
+发版流程（三处版本号一致性校验、CI 自动打 tag 与创建 Release）与推送前脱敏审计见
+[CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 
