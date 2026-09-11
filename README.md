@@ -106,15 +106,16 @@ python3 mcp_daemon.py
 - **熔断保护**: 连续 5 次失败 → 30s 冷却，防止雪崩
 - **线程安全**: socket 收发原子锁 + 缓存 single-flight 锁（并发查询只实际拉取一次）
 - **自愈**: 守护进程每 60s 健康检查，session 过期自动恢复
-- **凭证加密**: 主密码自动 Fernet 加密存储，密钥绑定本机指纹
+- **凭证加密**: `master_password` / `client_secret` / `api_key` 自动 Fernet 加密存储，密钥绑定本机指纹
 
 ---
 
 ## 安全
 
 - Unix Socket 权限 `0o600`（umask + chmod 双重保护）
-- 密码/API Key 通过 Vaultwarden 管理，不落盘
-- 配置文件中的敏感字段自动加密（`!enc:v1:...`）
+- 日志目录 `0o700` / 日志文件 `0o600`，日志中的账号以掩码记录
+- 密码/API Key 由 Vaultwarden 托管，本地仅按需读取
+- 配置文件中的敏感字段自动加密（`!enc:v1:...`），含 `master_password` / `client_secret` / `api_key`
 - **加密密钥绑定本机**，配置文件不可跨机器复制
 
 ---
@@ -126,10 +127,10 @@ python3 mcp_daemon.py
 | Vaultwarden 地址 | `BW_HOST` | 如 `https://vault.example.com` |
 | 登录邮箱 | `BW_EMAIL` | |
 | 主密码 | `BW_MASTER_PASSWORD` | 会自动加密存储 |
-| API Key | `BW_CLIENTID` / `BW_CLIENTSECRET` | 推荐，兼容 2FA |
-| API Key（单字段） | `BW_API_KEY` | `user.clientId.clientSecret` 格式，自动拆分 |
+| API Key | `BW_CLIENTID` / `BW_CLIENTSECRET` | 推荐，兼容 2FA；`client_secret` 会自动加密 |
+| API Key（单字段） | `BW_API_KEY` | `user.clientId.clientSecret` 格式，自动拆分；存入 config.json 的 `api_key` 时同样加密 |
 | MCP Server 路径 | `MCP_SERVER_PATH` / `BITWARDEN_MCP_SERVER_PATH` | 留空自动发现（npm/which/常见路径） |
-| 自定义配置目录 | `SMARTBW_CONFIG_DIR` | 默认 `~/.config/bitwarden-mcp/` |
+| 自定义配置目录 | `SMARTBW_CONFIG_DIR` | 默认 `~/.config/bitwarden-mcp/`；支持 `~` 展开，读写与加密均以该目录为准 |
 | MCP 超时 | `SMARTBW_MCP_TIMEOUT` | 默认 30s |
 | 模糊搜索阈值 | `SMARTBW_FUZZY_THRESHOLD` | 默认 0.5 |
 | 缓存 TTL | `SMARTBW_CACHE_TTL` | 默认 15s；过期即同步刷新，无定时器 |
@@ -138,7 +139,7 @@ python3 mcp_daemon.py
 | 自动解锁 | `SMARTBW_AUTO_UNLOCK` | 默认 1（设为 `0` 关闭） |
 | 自动解锁重试次数 | `SMARTBW_MAX_UNLOCK_ATTEMPTS` | 默认 3 |
 | CLI 超时（status/login/unlock/discovery） | `SMARTBW_CLI_STATUS_TIMEOUT` / `SMARTBW_CLI_LOGIN_TIMEOUT` / `SMARTBW_CLI_UNLOCK_TIMEOUT` / `SMARTBW_CLI_DISCOVERY_TIMEOUT` | 默认 10 / 15 / 15 / 10s |
-| 日志级别 / 日志文件 | `LOG_LEVEL` / `LOG_FILE` | 默认 `INFO`；**仅直接运行 `python3 config.py` 时生效**，守护进程与 MCP server 不读取 |
+| 日志级别 / 日志文件 | `LOG_LEVEL` / `LOG_FILE` | `LOG_LEVEL` 影响 MCP server（默认 `INFO`）与 `python3 config.py`；守护进程固定 `INFO`。`LOG_FILE` 仅 `python3 config.py` 生效 |
 
 ---
 

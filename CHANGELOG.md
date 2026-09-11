@@ -1,5 +1,48 @@
 # 变更日志
 
+## [2.3.2] - 2026-09-11
+
+> 依据 v2.3.1 第三方审计报告（`docs/dev/AUDIT_REPORT_v2.3.1.md`，R3）的修复提交。
+> 真机复核：对运行中的 daemon + 自建 Vaultwarden 跑通 `SMARTBW_LIVE_TEST=1 pytest tests/test_cache_live.py`。
+
+### 🔴 P0
+
+- **打包完全不可用（P0-1）**: `build-backend = "setuptools.backends._legacy:_Backend"` 指向不存在的模块，且 `[tool.setuptools.py-modules]` 写法非法（应为 `[tool.setuptools] py-modules`）——`pip wheel/install .` 或直接报 `BackendUnavailable` / `must be array`，或在 setuptools 59 下静默产出 `UNKNOWN-0.0.0` 空 wheel。已改为 `setuptools.build_meta` + 合法 `py-modules`，CI 新增 wheel 内容校验防回归
+- **`SMARTBW_CONFIG_DIR` 语义破裂（P0-2）**: `crypto_config.py` 自行硬编码默认路径，导致设置自定义目录时出现"读 A 目录、加密写回 B 目录"——加密承诺失效，且默认目录的凭据会覆盖用户指定目录（跨目录凭据污染）。新增 `paths.py` 统一 `runtime_dir()/config_path()/env_path()`，`config.py` 与 `crypto_config.py` 共用；路径以**函数**暴露，不在 import 期冻结
+- **`api_key` 明文落盘（P0-3）**: `SENSITIVE_KEYS` 只含 `master_password`/`client_secret`，而 `api_key`（`user.<clientId>.<clientSecret>`）内含 clientSecret，存入 config.json 时永久明文。已纳入加密字段
+
+### 🟡 P1
+
+- **`SMARTBW_CONFIG_DIR` 不支持 `~`（P1-1）**: `Path(custom)` 未 `expanduser()`，按 `.env.example` 示例复制即静默失效；另修 `.env` 中的同名变量因加载顺序不生效（改为两趟解析）
+- **密文降级为明文（P1-2）**: 解密失败时 `!enc:v1:` 密文会被原样当作主密码传给 `bw unlock`。合并配置时跳过密文并报错
+- **MCP server INFO 日志被丢弃（P1-3）**: `basicConfig(level=WARNING)` 使 CHANGELOG 宣传的 `[cache]`/`[prewarm]` 可观测性日志完全不可见。改为受 `LOG_LEVEL` 控制（默认 `INFO`），仍只写 stderr
+- **日志权限与账号切片（P1-4）**: 日志目录/文件权限此前依赖 umask（实测 0775/0664，同组可读）；`unlock.py` 记录 `client_id[:12]`、`email[:12]`。现显式 `0700`/`0600`，账号改为掩码；`install.sh` 同步收紧 `~/.smartbw-mcp` 权限
+- **缓存与索引非原子替换（P1-5）**: `_items_cache` / `_name_index` 分两次赋值，读侧可能看到「新 items + 旧 index」。改为 `(items, index)` 单次原子绑定（`_snapshot`）
+- **共享 socket 并发关闭（P1-6）**: `DaemonClient.close()` 未持 `_send_lock`，会把正在收发的 socket 置 None。现与 `send_request()` 共用同一把锁
+- **`readline()` 阻塞挂死 daemon（P1-7）**: `poll` 只保证"有数据"、不保证"有一整行"，在管道上 `readline()` 无超时保护。改为 `text=False` + `poll`/`os.read` + 自维护缓冲按 `\n` 分帧
+- **`smartbw_list_all` 无上限（P1-8）**: 新增 `limit`（默认 50，硬上限 200），超出时提示已截断；`smartbw_search` 的 limit 夹取也做了非法输入兜底
+- **`_is_unlocked` 回退过宽（P1-9）**: 非 JSON 输出时"除 not logged in 外一律判为已登录"。改为白名单：仅 `unlocked`/`locked` 视为已登录
+- **熔断器被绕过 + `list_items` 吞错（P1-10，v2.2.7 遗留）**: `_with_circuit` 未把通用异常计入失败（与 README「连续 5 次失败 → 30s 冷却」不符）；`list_items` 静默返回 `[]` 会让长驻缓存把"拉取失败"当成"空库"固化 15s。现通用异常同样计数，`list_items` 不再吞错
+- **`_stop_daemon` 按 PID 直杀（P1-11）**: 新增 `/proc/<pid>/cmdline` 归属校验，防 PID 复用误杀
+- **CI 不跑 pytest/ruff（P1-12）**: 新增 `.github/workflows/ci.yml`（py3.8/3.10/3.12 矩阵：ruff 阻断 + `pytest --cov --cov-fail-under=30`），并新增 pytest 打包内容校验 job
+- **install.sh 把 API Key 写进 `client_id`（P1-13）**: 导致 `client_secret` 为空、`_try_api_key_login` 恒失败（安装脚本"推荐"的 API Key 路径实际不可用）。改为写入 `api_key`；`config.example.json` 补齐该字段；`docs/dev/install_openclaw.sh` 同步修正
+
+### 🟢 P2 / 工程
+
+- `ruff check .` 归零（31 issues → 0），并纳入 CI 阻断
+- 自定义异常改名 `BwTimeoutError` / `BwConnectionError`，不再遮蔽内置 `TimeoutError` / `ConnectionError`；`mcp_daemon` 回退分支语义固定
+- MCP 子进程 `stderr` 改为后台线程排空，避免管道写满阻塞子进程
+- `install.sh` 不再硬编码 `/usr/bin/python3`（改用 `command -v python3`），修正重复步骤号；仓库内 `smartbw-daemon.service` 改为占位符模板（由安装脚本渲染）
+- `cryptography` 下限 `>=3.0` → `>=3.4.8`；`config.py` 类型标注风格统一
+- `.gitignore` 补 `.coverage` / `.ruff_cache/` 等条目
+- `scripts/pre-commit.sh` 增加**内容级**脱敏扫描（内网 IP / token 前缀 / 白名单外邮箱与域名，仅打印文件:行号）
+- **`smartbw_sync_cache` 改走守护进程（P2-3）**: 原实现绕过通信层直连 `bw sync`（第二个 `bw` 进程 + 另一套环境）。真机确认 `bw status`=`locked` 时直连也能成功，但已改为复用 `client.call_tool("sync")`，与缓存刷新同源、复用 daemon 持有的有效 session
+- **`NEEDS_REINIT` 归属判断（P2-12）**: 标记位于运行目录 `~/.smartbw-mcp/`，不受 `SMARTBW_CONFIG_DIR` 约束，而清理逻辑原先**无条件** `unlink()` —— 用自定义配置目录运行时会误删默认目录的合法标记。现按"标记内容是否指向本目录 `config.json`"判断归属（默认目录沿用原行为）
+- **测试隔离加固**: `tests/conftest.py` 默认同时重定向 `HOME` 与 `SMARTBW_CONFIG_DIR`（`SMARTBW_LIVE_TEST=1` 时不隔离，供真机用例使用）。此前只隔离配置目录，导致"密文解密失败"用例把 `NEEDS_REINIT` 写进了真实 `~/.smartbw-mcp/`
+- `smartbw_mcp_server` 分类C 错误信息里的 `bw_host` 改为"环境变量 → 配置文件"两级回退，避免仅在 config.json 配置时报"未设置"
+- 测试 26 → 50 项（48 passed + 2 skipped），覆盖率 25% → 34%；`tests/test_audit_fixes.py` 覆盖加解密 round-trip、密文降级防护、`_is_unlocked` 白名单、熔断器、`_resolve_search`、`_send_raw` 分帧与超时、`NEEDS_REINIT` 归属
+- **真机复核（R3）**: 对运行中的 daemon + 自建 Vaultwarden 跑通 `SMARTBW_LIVE_TEST=1 pytest tests/test_cache_live.py`（2 passed），并实测 `list_all(limit=3)` 截断、`sync_cache` 走 daemon、stderr 可见 `[cache]`/`[prewarm]` 日志；全程真实 `config.json` sha256 前后一致
+
 ## [2.3.1] - 2026-09-11
 
 ### 🔧 Bug 修复

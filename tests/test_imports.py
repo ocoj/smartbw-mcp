@@ -6,17 +6,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
 def test_config_import():
-    from config import CONFIG, DEFAULT_TIMEOUT, FUZZY_THRESHOLD, get_config
+    from config import CONFIG, DEFAULT_TIMEOUT, FUZZY_THRESHOLD
     assert DEFAULT_TIMEOUT == 30
     assert 0 < FUZZY_THRESHOLD <= 1
     assert isinstance(CONFIG, dict)
 
 
 def test_models_import():
-    from models import BwItem, ConnectionError, LockedError, SearchResult, TimeoutError
+    from models import BwItem, BwTimeoutError, LockedError
     item = BwItem(id="test", name="Test")
     assert item.name == "Test"
-    assert issubclass(TimeoutError, Exception)
+    assert issubclass(BwTimeoutError, Exception)
     assert issubclass(LockedError, Exception)
 
 
@@ -26,7 +26,13 @@ def test_mcp_raw_import():
 
 
 def test_smart_search_import():
-    from smart_search import SmartBitwardenMCP, get_password_smart, get_smart_mcp, _normalize, _fuzzy_score
+    from smart_search import (
+        SmartBitwardenMCP,
+        _fuzzy_score,
+        _normalize,
+        get_password_smart,
+        get_smart_mcp,
+    )
     assert SmartBitwardenMCP is not None
     assert callable(get_smart_mcp)
     assert callable(get_password_smart)
@@ -41,7 +47,7 @@ def test_smart_search_import():
 
 
 def test_mcp_daemon_import():
-    from mcp_daemon import DaemonClient, DaemonServer, MCPServerManager
+    from mcp_daemon import DaemonClient, MCPServerManager
     assert DaemonClient is not None
     assert MCPServerManager is not None
 
@@ -52,7 +58,7 @@ def test_unlock_import():
 
 
 def test_crypto_config_import():
-    from crypto_config import encrypt_value, decrypt_value, process_config_on_startup
+    from crypto_config import decrypt_value, encrypt_value
     assert callable(encrypt_value)
     assert callable(decrypt_value)
 

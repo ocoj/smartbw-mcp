@@ -14,7 +14,8 @@
 │ JSON-RPC, 熔断器 (5次/30s), CRUD 操作           │
 ├─────────────────────────────────────────────────┤
 │ mcp_daemon.py            守护进程层               │
-│ Unix Socket 常驻, 子进程管理, 自愈, 并发         │
+│ Unix Socket 常驻, 子进程管理, 自愈               │
+│ （事件循环单线程：多连接排队，串行处理请求）      │
 ├─────────────────────────────────────────────────┤
 │ @bitwarden/mcp-server    Node.js 协议层           │
 │ Bitwarden 官方 MCP Server (npm)                  │
@@ -24,6 +25,7 @@
 
 辅助模块:
   config.py         配置加载 (环境变量 / .env / config.json)
+  paths.py          统一运行时路径 (SMARTBW_CONFIG_DIR / config.json / .env)
   crypto_config.py  凭证加密 (HKDF-SHA256 + Fernet)
   unlock.py         自动登录/解锁
   models.py         数据类型与异常
@@ -111,6 +113,7 @@ TTL 15 秒（`SMARTBW_CACHE_TTL`）。**没有任何定时器** —— 只有查
 | `mcp_raw.py` | JSON-RPC 通信 + 熔断 | `RealMCPClient`, `_with_circuit()` |
 | `mcp_daemon.py` | Unix Socket + 子进程管理 | `DaemonServer`, `MCPServerManager` |
 | `unlock.py` | bw CLI 自动登录/解锁 | `auto_unlock()` |
-| `crypto_config.py` | 凭证加密/解密 | `process_config_on_startup()` |
+| `crypto_config.py` | 凭证加密/解密（`master_password` / `client_secret` / `api_key`） | `process_config_on_startup()` |
+| `paths.py` | 统一运行时路径解析（`SMARTBW_CONFIG_DIR`，支持 `~`） | `runtime_dir()`, `config_path()`, `env_path()` |
 | `config.py` | 配置加载 + 路径发现 | `get_config()`, `_find_mcp_path()` |
-| `models.py` | 数据类型与异常 | `BwItem`, `SearchResult` |
+| `models.py` | 数据类型与异常 | `BwItem`, `SearchResult`, `BwTimeoutError` |

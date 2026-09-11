@@ -2,9 +2,9 @@
 单元测试：验证 smartbw-mcp F-05 修复（DaemonClient 超时异常类型）
 """
 
+import os
 import socket
 import sys
-import os
 
 try:
     import pytest
@@ -26,7 +26,7 @@ class TestDaemonClientTimeoutType:
         import builtins
 
         from mcp_daemon import DaemonClient
-        from models import TimeoutError as MCPTimeoutError
+        from models import BwTimeoutError as MCPTimeoutError
 
         client = DaemonClient(timeout=1)
         client.sock = _FakeTimeoutSocket()  # type: ignore[assignment]
@@ -46,7 +46,7 @@ class TestDaemonClientTimeoutType:
     def test_circuit_breaker_catches_mcp_timeout_error(self):
         """熔断器 _with_circuit 能捕获 DaemonClient 抛出的超时异常"""
         from mcp_raw import RealMCPClient
-        from models import TimeoutError as MCPTimeoutError
+        from models import BwTimeoutError as MCPTimeoutError
 
         client = RealMCPClient.__new__(RealMCPClient)
         client._failure_count = 0
@@ -98,7 +98,7 @@ class _FakeDaemonClient:
 
     def send_request(self, method, params):
         if self._timeout_error:
-            from models import TimeoutError as MCPTimeoutError
+            from models import BwTimeoutError as MCPTimeoutError
             raise MCPTimeoutError("守护进程响应超时 (30s)")
         return {"result": "ok"}
 
