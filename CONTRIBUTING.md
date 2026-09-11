@@ -31,6 +31,12 @@ pytest tests/ -v
 python3 tests/test_imports.py
 ```
 
+真机集成测试（会访问真实 Vaultwarden，**默认跳过**，仅执行读操作），需 daemon 运行中：
+
+```bash
+SMARTBW_LIVE_TEST=1 pytest tests/test_cache_live.py -v
+```
+
 ## 提交规范
 
 - 使用语义化 commit message：`fix:` / `feat:` / `docs:` / `refactor:`

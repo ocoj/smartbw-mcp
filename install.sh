@@ -96,8 +96,7 @@ else
   "master_password": "$BW_MASTER_PASSWORD",
   "client_id": "$BW_API_KEY",
   "client_secret": "",
-  "mcp_server_path": "",
-  "connection_timeout_seconds": 15
+  "mcp_server_path": ""
 }
 EOF
     chmod 600 "$CONFIG_DIR/config.json"
@@ -126,8 +125,8 @@ Type=simple
 ExecStart=/usr/bin/python3 $SCRIPT_DIR/mcp_daemon.py
 Restart=always
 RestartSec=10
-StandardOutput=append:%h/.smartbw-mcp/daemon.log
-StandardError=append:%h/.smartbw-mcp/daemon.log
+# 日志由 mcp_daemon.py 的 TimedRotatingFileHandler 写入 ~/.smartbw-mcp/daemon.log（保留 30 天）。
+# 切勿在此把 stdout/stderr 重定向到同一文件：会造成每行日志重复，且 systemd 持有旧 fd 导致轮转失效。
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
@@ -137,7 +136,7 @@ SERVICE_EOF
     systemctl --user daemon-reload
     systemctl --user enable --now smartbw-daemon 2>/dev/null || {
         warn "systemd 启动失败，尝试后台模式..."
-        nohup python3 "$SCRIPT_DIR/mcp_daemon.py" > "$DAEMON_DIR/daemon.log" 2>&1 &
+        nohup python3 "$SCRIPT_DIR/mcp_daemon.py" >/dev/null 2>&1 &  # 日志由程序自身写入 daemon.log
         echo $! > "$DAEMON_DIR/daemon.pid"
     }
     sleep 2
@@ -146,7 +145,7 @@ SERVICE_EOF
     fi
 else
     # 后台进程模式
-    nohup python3 "$SCRIPT_DIR/mcp_daemon.py" > "$DAEMON_DIR/daemon.log" 2>&1 &
+    nohup python3 "$SCRIPT_DIR/mcp_daemon.py" >/dev/null 2>&1 &  # 日志由程序自身写入 daemon.log
     echo $! > "$DAEMON_DIR/daemon.pid"
     ok "daemon 已后台启动 (PID $(cat $DAEMON_DIR/daemon.pid))"
 fi

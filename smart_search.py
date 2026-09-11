@@ -15,9 +15,22 @@ import threading
 import time
 from typing import Dict, List, Optional
 
-from config import DEFAULT_TIMEOUT, FUZZY_THRESHOLD, logger
+from config import (
+    CACHE_REFRESH_MIN_AGE,
+    CACHE_SUSPICIOUS_SCORE,
+    CACHE_TTL,
+    DEFAULT_TIMEOUT,
+    FUZZY_THRESHOLD,
+    logger,
+)
 from mcp_raw import RealMCPClient
-from models import BwItem, LockedError, SearchResult, TimeoutError
+from models import (
+    BwItem,
+    ConnectionError as MCPConnectionError,
+    LockedError,
+    SearchResult,
+    TimeoutError,
+)
 
 # ============================================================================
 # 智能搜索辅助函数
@@ -48,6 +61,16 @@ def _fuzzy_score(query: str, target: str) -> float:
     return difflib.SequenceMatcher(None, q, t).ratio()
 
 
+def _fetch_items(client) -> List[Dict]:
+    """拉取最新项目列表：先 sync（唯一的服务器请求）再全量 list。
+
+    实测 list 的开销是本地全量解密（~3.3s 固定），带不带 search 过滤都一样，
+    所以这里不做 search 窄化 —— 靠"短 TTL 缓存 + 后台刷新"来摊薄，而不是缩短单次拉取。
+    """
+    client.call_tool("sync", {})
+    return client.list_items(type="items") or []
+
+
 # ============================================================================
 # 智能 Bitwarden MCP 客户端
 # ============================================================================
@@ -59,14 +82,29 @@ class SmartBitwardenMCP:
                  timeout: int = DEFAULT_TIMEOUT, use_daemon: bool = True):
         self.client = RealMCPClient(timeout, use_daemon=use_daemon)
 
-        # 缓存机制（TTL 300秒，密码库不会秒变）
-        self._items_cache = None
-        self._cache_time = 0
-        self._cache_ttl = 30  # 30 秒 TTL，减少缓存延迟
+        # 长驻缓存：TTL 见 config.CACHE_TTL（默认 15s）。
+        # 后端多为个人自建 Vaultwarden，TTL 必须短，否则条目更新后会查到旧值。
+        # 注意：只有在实例跨调用复用时这个缓存才生效（见 smartbw_mcp_server._get_client）。
+        self._items_cache: Optional[List[Dict]] = None
+        self._cache_time = 0.0
+        self._cache_ttl = CACHE_TTL
+        self._last_attempt_time = 0.0
 
-        # 搜索索引（首次加载后建，加速后续查询）
+        # O4 single-flight：前台装载与异步刷新共用，保证同一时刻只有一次真正拉取
+        self._load_lock = threading.Lock()
+        # 异步刷新状态（仅 smartbw_sync_cache 清缓存后预热用；
+        # TTL 过期走 _ensure_items 的同步刷新，不经过这里）
+        self._refresh_inflight = False
+        self._refresh_lock = threading.Lock()
+
+        # 搜索索引（随缓存整体替换，加速后续查询）
         self._name_index: Dict[str, List[Dict]] = {}  # normalized_name → [item_dict, ...]
-        self._index_dirty = True
+
+        # O6 统计
+        self._stat_hits = 0
+        self._stat_rebuilds = 0
+        self._stat_bg_refresh = 0
+        self._stat_force_refresh = 0
 
         if auto_init:
             self.initialize()
@@ -78,50 +116,145 @@ class SmartBitwardenMCP:
         """健康检查"""
         return self.client.ping()
 
-    def clear_cache(self) -> None:
-        """清除项目缓存和索引"""
-        self._items_cache = None
-        self._cache_time = 0
-        self._name_index = {}
-        self._index_dirty = True
-        logger.info("缓存和索引已清除")
+    # ─── 缓存管理 ─────────────────────────────
 
-    def _build_index(self) -> None:
-        """构建搜索索引（name→item 映射，支持快速前缀/精确查找）"""
-        if not self._index_dirty or self._items_cache is None:
-            return
+    def clear_cache(self) -> None:
+        """清除项目缓存与索引（下次查询重新装载，确保拿到最新数据）"""
+        self._items_cache = None
+        self._cache_time = 0.0
         self._name_index = {}
-        for item in self._items_cache:
-            name = _normalize(item.get("name", ""))
-            if name not in self._name_index:
-                self._name_index[name] = []
-            self._name_index[name].append(item)
-        self._index_dirty = False
-        logger.info(f"索引构建完成: {len(self._name_index)} 个唯一条目名")
+        logger.info("[cache] 已清除缓存与索引")
+
+    def refresh_stats(self) -> str:
+        """O6：缓存命中/重建统计，供日志与 smartbw_sync_cache 展示"""
+        return (f"命中={self._stat_hits} 同步重建={self._stat_rebuilds} "
+                f"异步预热={self._stat_bg_refresh} 强制刷新={self._stat_force_refresh}")
+
+    def _cache_age(self) -> float:
+        return (time.time() - self._cache_time) if self._cache_time else float("inf")
+
+    def _is_stale(self) -> bool:
+        return self._items_cache is None or self._cache_age() > self._cache_ttl
+
+    def _should_force_refresh(self) -> bool:
+        """O3：距最近一次装载（成功装载完成 或 失败尝试）太近就跳过。
+
+        必须取 max(_cache_time, _last_attempt_time)：
+        - _cache_time 在**装载完成**时写入 → 刚装载完不会立刻再拉（避免白跑两遍）
+        - _last_attempt_time 在**尝试开始**时写入 → 装载失败时也能拦住连环重试
+        只用 _last_attempt_time 是有坑的：一次装载耗时约 5s，与该门槛同量级，
+        等它返回时门槛早已到期，导致"刚装载完立刻又拉一遍"。
+        """
+        last = max(self._cache_time, self._last_attempt_time)
+        return (time.time() - last) >= CACHE_REFRESH_MIN_AGE
+
+    def _install_items(self, items: List[Dict]) -> None:
+        """整体替换缓存与索引：先建好新索引再换指针，避免读到半成品。"""
+        index: Dict[str, List[Dict]] = {}
+        for item in items:
+            index.setdefault(_normalize(item.get("name", "")), []).append(item)
+        self._items_cache = items
+        self._name_index = index
+        self._cache_time = time.time()
+
+    def _fetch_with_temp_client(self) -> List[Dict]:
+        """用独立连接拉取数据。
+
+        不能在后台线程复用 self.client —— 主线程每次工具调用结束都会 close() 它的
+        socket，并发时会互相打断。多开一条 unix socket 的代价可忽略。
+        """
+        tmp = RealMCPClient(self.client.timeout, use_daemon=True)
+        try:
+            if not tmp.initialize():
+                raise MCPConnectionError("守护进程不可用，无法拉取缓存")
+            return _fetch_items(tmp)
+        finally:
+            try:
+                tmp.close()
+            except Exception:
+                pass
+
+    def _load_items_blocking(self, force: bool = False) -> List[Dict]:
+        """阻塞式装载（O4：并发时只有一个线程真正去拉，其余等它完成后复用结果）。"""
+        with self._load_lock:
+            if not force and self._items_cache is not None and not self._is_stale():
+                self._stat_hits += 1
+                return self._items_cache
+            self._last_attempt_time = time.time()
+            t0 = time.time()
+            try:
+                items = self._fetch_with_temp_client()
+            except Exception as e:
+                # 失败时保留旧缓存；不更新 _cache_time，下次查询会重试
+                logger.error(f"[cache] 装载失败: {e}")
+                return self._items_cache or []
+            self._install_items(items)
+            if force:
+                self._stat_force_refresh += 1
+            else:
+                self._stat_rebuilds += 1
+            logger.info(f"[cache] 装载完成: {len(items)} 条, 耗时 {time.time() - t0:.2f}s"
+                        f" | {self.refresh_stats()}")
+            return self._items_cache or []
+
+    def _maybe_background_refresh(self) -> None:
+        """异步刷新缓存（不阻塞调用方）。
+
+        仅在 smartbw_sync_cache 清缓存后用于预热，避免下一条查询又等一次全量装载。
+        常规查询的 TTL 过期走 _ensure_items 的同步刷新，不经过这里。
+        """
+        with self._refresh_lock:
+            if self._refresh_inflight:
+                return
+            self._refresh_inflight = True
+        threading.Thread(target=self._background_refresh_worker, daemon=True).start()
+
+    def _background_refresh_worker(self) -> None:
+        try:
+            with self._load_lock:  # 与前台装载 single-flight，避免重复拉取
+                self._last_attempt_time = time.time()
+                t0 = time.time()
+                try:
+                    items = self._fetch_with_temp_client()
+                except Exception as e:
+                    logger.warning(f"[cache] 异步刷新失败: {e}")
+                    return
+                self._install_items(items)
+                self._stat_bg_refresh += 1
+                logger.info(f"[cache] 异步刷新完成: {len(items)} 条, 耗时 {time.time() - t0:.2f}s"
+                            f" | {self.refresh_stats()}")
+        finally:
+            with self._refresh_lock:
+                self._refresh_inflight = False
+
+    def _ensure_items(self, force: bool = False) -> List[Dict]:
+        """取项目列表（甲方案：无定时器，纯被动按需刷新）。
+
+        - 命中（缓存年龄 ≤ TTL）→ 直接读缓存，0 次请求
+        - 过期（年龄 > TTL）    → **同步刷新后再回答**，保证本次数据是最新的
+        - 冷启动（无缓存）      → 同步装载
+        - force=True            → 强制同步重建（用于无结果 / 结果可疑的重查）
+
+        注意：这里没有任何定时器。无人查询时不会产生任何 Vaultwarden 流量。
+        """
+        if force:
+            return self._load_items_blocking(force=True)
+        if self._items_cache is None or self._is_stale():
+            return self._load_items_blocking()
+        self._stat_hits += 1
+        return self._items_cache or []
+
+    def warm_up(self) -> None:
+        """O5：预热缓存（可在后台线程调用），避免首次查询等一次全量装载。"""
+        self._ensure_items()
+
+    def refresh_async(self) -> None:
+        """异步刷新缓存，调用方不阻塞（供 smartbw_sync_cache 清缓存后预热）。"""
+        self._maybe_background_refresh()
 
     def list_all_items(self) -> List[BwItem]:
-        """
-        列出所有项目
-        返回所有项目的列表(使用缓存)
-        """
-        # 使用缓存机制
-        current_time = time.time()
-        if (self._items_cache is None or
-            current_time - self._cache_time > self._cache_ttl):
-            try:
-                # 缓存过期：先 sync 确保 node MCP server 拿到最新数据
-                self.client.call_tool("sync", {})
-                self._items_cache = self.client.list_items(type="items")
-                self._cache_time = current_time
-                logger.info(f"缓存更新,项目数: {len(self._items_cache)}")
-            except TimeoutError:
-                logger.error("list_all_items 超时")
-                return []
-            except LockedError:
-                logger.error("list_all_items 锁定失败")
-                return []
-
-        items_dict = self._items_cache
+        """列出所有项目（使用长驻缓存，TTL 见 config.CACHE_TTL）"""
+        items_dict = self._ensure_items()
         items = []
         for item_dict in items_dict:
             items.append(BwItem(
@@ -184,23 +317,39 @@ class SmartBitwardenMCP:
         参数:
             query: 搜索词
             max_results: 最大返回结果数(默认10)
-            retry_on_empty: 如果首次搜索无结果,是否自动清除缓存重试一次
+            retry_on_empty: 无结果 / 结果可疑时，是否强制刷新缓存后重查一次
+
+        刷新策略（专治"该刷没刷"，条目已更新却查到旧值）：
+          - 无结果     → 强制刷新后重查
+          - 结果可疑   → 最高分低于 CACHE_SUSPICIOUS_SCORE 时强制刷新后重查，取两次里更优的
+          - 受 O3 门槛约束：距上次装载不足 CACHE_REFRESH_MIN_AGE 秒则跳过，避免白跑
+        注意：这里只用 logger（stderr），绝不 print —— MCP server 的 stdout 是 JSON-RPC 流。
         """
         logger.info(f"搜索项目: '{query}' (max={max_results})")
 
-        # 第一次搜索
         results = self._do_fuzzy_search(query, max_results)
 
-        # 如果无结果且允许重试,且缓存存在(说明可能是缓存过期),清除缓存重试一次
-        if not results and retry_on_empty and self._items_cache is not None:
-            logger.info(f"搜索 '{query}' 无结果,尝试清除缓存重试...")
-            print(f"🔍 搜索 '{query}' 无项目,正在刷新缓存后重试,请稍候...")
-            self.clear_cache()
-            results = self._do_fuzzy_search(query, max_results)
-            if results:
-                logger.info(f"重试成功,找到 {len(results)} 个结果")
-            else:
-                logger.info(f"重试后仍无结果")
+        need_refresh = False
+        reason = ""
+        if not results and retry_on_empty:
+            need_refresh, reason = True, "无结果"
+        elif results and results[0].score < CACHE_SUSPICIOUS_SCORE:
+            need_refresh, reason = True, f"最高分 {results[0].score:.2f} 偏低"
+
+        if need_refresh:
+            if not self._should_force_refresh():
+                logger.info(f"搜索 '{query}' {reason}，但距上次装载不足 "
+                            f"{CACHE_REFRESH_MIN_AGE}s，跳过刷新")
+                return results
+            logger.info(f"搜索 '{query}' {reason}，强制刷新缓存后重查...")
+            fresh = self._do_fuzzy_search(query, max_results, force_refresh=True)
+            # 取两次里更优的，避免刷新后反而变差
+            if fresh and (not results or fresh[0].score > results[0].score):
+                if results:
+                    logger.info(f"刷新后重查更优: {fresh[0].score:.2f} > {results[0].score:.2f}")
+                else:
+                    logger.info(f"刷新后重查命中 {len(fresh)} 个结果")
+                return fresh
 
         return results
 
@@ -216,43 +365,17 @@ class SmartBitwardenMCP:
         logger.info(f"模糊搜索: '{query}'")
         return self.search_items(query, max_results, retry_on_empty)
 
-    def _do_fuzzy_search(self, query: str, max_results: int = 5) -> List[SearchResult]:
-        """执行实际的模糊搜索（内部方法，带索引加速）"""
-        # 使用缓存机制
-        current_time = time.time()
-        if (self._items_cache is None or
-            current_time - self._cache_time > self._cache_ttl):
-            try:
-                # 缓存过期：先 sync 确保 node MCP server 拿到最新数据
-                self.client.call_tool("sync", {})
-                self._items_cache = self.client.list_items(type="items")
-                self._cache_time = current_time
-                self._index_dirty = True
-                logger.info(f"缓存更新,项目数: {len(self._items_cache)}")
-            except TimeoutError:
-                logger.error("获取列表超时,尝试重新初始化")
-                self.client.close()
-                time.sleep(0.5)
-                try:
-                    self.initialize()
-                    self._items_cache = self.client.list_items(type="items")
-                    self._cache_time = current_time
-                    self._index_dirty = True
-                except TimeoutError:
-                    logger.error("重试 list_items 再次超时, Vaultwarden 不可达")
-                    self._items_cache = self._items_cache or []
-                    # 空缓存时重置 _cache_time 避免 TTL 空窗屏蔽后续搜索
-                    if not self._items_cache:
-                        self._cache_time = 0
+    def _do_fuzzy_search(self, query: str, max_results: int = 5,
+                         force_refresh: bool = False) -> List[SearchResult]:
+        """执行实际的模糊搜索（内部方法，带索引加速）
 
-        items = self._items_cache
+        force_refresh=True 时阻塞重建缓存，用于"无结果 / 结果可疑"的重查。
+        """
+        items = self._ensure_items(force=force_refresh)
         if not items:
             return []
 
-        # 构建索引（如果脏了）
-        self._build_index()
-
-        # 快速路径：索引精确/前缀匹配
+        # 快速路径：索引精确/前缀匹配（索引随缓存一同构建）
         norm_q = _normalize(query)
         exact_matches = self._name_index.get(norm_q, [])
         prefix_matches = []

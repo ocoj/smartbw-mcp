@@ -94,7 +94,7 @@ python3 mcp_daemon.py
 | `smartbw_search` | 模糊搜索（名称/用户名/自定义字段） |
 | `smartbw_list_all` | 列出所有项目 |
 | `smartbw_daemon_status` | 检查守护进程状态 |
-| `smartbw_sync_cache` | 强制刷新缓存（bw sync + 清理缓存） |
+| `smartbw_sync_cache` | 强制刷新（bw sync + 重启 MCP server + 清缓存） |
 
 ---
 
@@ -102,8 +102,9 @@ python3 mcp_daemon.py
 
 - **模糊搜索**: 6 种评分策略，名称/用户名/自定义字段全覆盖，支持错别字容错
 - **索引加速**: 首次加载后构建名称索引，精确/前缀匹配 O(1)
+- **短 TTL 缓存**: 项目列表常驻内存，TTL 15s 按需刷新（**无定时器**）；过期即同步刷新，无结果/结果可疑自动重查；无人查询时零后端请求
 - **熔断保护**: 连续 5 次失败 → 30s 冷却，防止雪崩
-- **线程安全**: socket 收发原子锁 + 缓存双重检查锁
+- **线程安全**: socket 收发原子锁 + 缓存 single-flight 锁（并发查询只实际拉取一次）
 - **自愈**: 守护进程每 60s 健康检查，session 过期自动恢复
 - **凭证加密**: 主密码自动 Fernet 加密存储，密钥绑定本机指纹
 
@@ -126,9 +127,18 @@ python3 mcp_daemon.py
 | 登录邮箱 | `BW_EMAIL` | |
 | 主密码 | `BW_MASTER_PASSWORD` | 会自动加密存储 |
 | API Key | `BW_CLIENTID` / `BW_CLIENTSECRET` | 推荐，兼容 2FA |
+| API Key（单字段） | `BW_API_KEY` | `user.clientId.clientSecret` 格式，自动拆分 |
+| MCP Server 路径 | `MCP_SERVER_PATH` / `BITWARDEN_MCP_SERVER_PATH` | 留空自动发现（npm/which/常见路径） |
 | 自定义配置目录 | `SMARTBW_CONFIG_DIR` | 默认 `~/.config/bitwarden-mcp/` |
 | MCP 超时 | `SMARTBW_MCP_TIMEOUT` | 默认 30s |
 | 模糊搜索阈值 | `SMARTBW_FUZZY_THRESHOLD` | 默认 0.5 |
+| 缓存 TTL | `SMARTBW_CACHE_TTL` | 默认 15s；过期即同步刷新，无定时器 |
+| 强制刷新最小间隔 | `SMARTBW_CACHE_REFRESH_MIN_AGE` | 默认 5s；避免一次查询重复拉取 |
+| 结果可疑阈值 | `SMARTBW_CACHE_SUSPICIOUS_SCORE` | 默认 0.6；须 > 模糊搜索阈值，否则该分支不生效 |
+| 自动解锁 | `SMARTBW_AUTO_UNLOCK` | 默认 1（设为 `0` 关闭） |
+| 自动解锁重试次数 | `SMARTBW_MAX_UNLOCK_ATTEMPTS` | 默认 3 |
+| CLI 超时（status/login/unlock/discovery） | `SMARTBW_CLI_STATUS_TIMEOUT` / `SMARTBW_CLI_LOGIN_TIMEOUT` / `SMARTBW_CLI_UNLOCK_TIMEOUT` / `SMARTBW_CLI_DISCOVERY_TIMEOUT` | 默认 10 / 15 / 15 / 10s |
+| 日志级别 / 日志文件 | `LOG_LEVEL` / `LOG_FILE` | 默认 `INFO`；**仅直接运行 `python3 config.py` 时生效**，守护进程与 MCP server 不读取 |
 
 ---
 

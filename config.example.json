@@ -8,6 +8,5 @@
   "master_password": "",
   "client_id": "",
   "client_secret": "",
-  "mcp_server_path": "",
-  "connection_timeout_seconds": 15
+  "mcp_server_path": ""
 }

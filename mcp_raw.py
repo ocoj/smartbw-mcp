@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from config import CONFIG, DEFAULT_TIMEOUT, logger
+from config import DEFAULT_TIMEOUT, get_config, logger
 from models import ConnectionError, LockedError, TimeoutError
 
 # ============================================================================
@@ -38,7 +38,9 @@ class RealMCPClient:
         self._max_failures = 5
         self._circuit_cooldown = 30.0
 
-        self.bw_host = CONFIG.get("bw_host", "https://your-vaultwarden-server.com")
+        # 惰性取配置：不在模块顶层 import CONFIG，避免 import 期就触发
+        # get_config() -> MCP 路径自动发现（npm/which 子进程）
+        self.bw_host = get_config().get("bw_host", "https://your-vaultwarden-server.com")
         logger.info(f"Bitwarden 服务器: {self.bw_host}")
 
         try:

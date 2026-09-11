@@ -8,8 +8,8 @@ Type=simple
 ExecStart=/usr/bin/python3 %h/.agents/skills/smartbw-mcp/mcp_daemon.py
 Restart=always
 RestartSec=10
-StandardOutput=append:%h/.smartbw-mcp/daemon.log
-StandardError=append:%h/.smartbw-mcp/daemon.log
+# 日志由 mcp_daemon.py 的 TimedRotatingFileHandler 写入 ~/.smartbw-mcp/daemon.log（保留 30 天）。
+# 切勿在此把 stdout/stderr 重定向到同一文件：会造成每行日志重复，且 systemd 持有旧 fd 导致轮转失效。
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

@@ -135,17 +135,30 @@ def _find_mcp_server():
 
 
 class MCPServerManager:
-    """管理单个长期运行的 node mcp-server 子进程"""
+    """管理单个长期运行的 node mcp-server 子进程
+
+    锁约定（获取顺序固定，不可反向）：
+      _lifecycle_lock → _lock
+      - _lifecycle_lock: 串行化 start/stop/restart。健康检查线程与请求线程会并发调用，
+        没有它会出现重复 spawn、或新进程刚启动就被另一线程 kill 的竞态。
+      - _lock: 仅保护单次 JSON-RPC 收发的原子性（_send_raw）。
+    """
 
     def __init__(self, bw_session: str):
         self.bw_session = bw_session
         self.process: Optional[subprocess.Popen] = None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()              # 保护 _send_raw 收发原子性
+        self._lifecycle_lock = threading.Lock()    # 串行化 start/stop/restart
         self._request_id = 0
         self._initialized = False
 
     def start(self, bw_session: Optional[str] = None) -> bool:
-        """启动 MCP Server。可选传入新 session 替换旧 token。"""
+        """启动 MCP Server（线程安全）。可选传入新 session 替换旧 token。"""
+        with self._lifecycle_lock:
+            return self._start_locked(bw_session)
+
+    def _start_locked(self, bw_session: Optional[str] = None) -> bool:
+        """start() 的实际实现；调用方必须已持有 _lifecycle_lock。"""
         if bw_session:
             self.bw_session = bw_session
 
@@ -263,8 +276,7 @@ class MCPServerManager:
         # 内部命令：重启 MCP Server
         if method == "daemon/restart-mcp":
             logger.info("[EVENT] daemon_restart_mcp: 收到重启 MCP Server 请求")
-            self.stop()
-            if self.start():
+            if self.restart():
                 logger.info("[EVENT] daemon_restart_mcp: MCP Server 重启成功")
                 return {"jsonrpc": "2.0", "id": request.get("id", 0), "result": {"status": "ok"}}
             else:
@@ -284,6 +296,12 @@ class MCPServerManager:
         return self.process is not None and self.process.poll() is None
 
     def stop(self):
+        """停止 MCP Server（线程安全）"""
+        with self._lifecycle_lock:
+            self._stop_locked()
+
+    def _stop_locked(self):
+        """stop() 的实际实现；调用方必须已持有 _lifecycle_lock。"""
         if self.process:
             logger.info("停止 MCP Server")
             try:
@@ -300,6 +318,14 @@ class MCPServerManager:
                 except OSError:
                     pass
             self.process = None
+        # 进程已不在，初始化标记必须复位，否则与进程状态不一致
+        self._initialized = False
+
+    def restart(self) -> bool:
+        """原子重启 MCP Server：stop + start 在同一把锁内完成，避免被其他线程插入。"""
+        with self._lifecycle_lock:
+            self._stop_locked()
+            return self._start_locked()
 
 
 # === Unix Socket 服务器 ===
@@ -313,6 +339,7 @@ class DaemonServer:
         self.mcp = MCPServerManager(bw_session)
         self.server_sock: Optional[socket.socket] = None
         self._running = False
+        self._cleaned = False  # cleanup() 幂等守卫（_shutdown 与 atexit 都会调）
         self._clients = []
 
     def start(self):
@@ -518,6 +545,11 @@ class DaemonServer:
         sys.exit(0)
 
     def cleanup(self):
+        # 幂等：_shutdown() 与 atexit 注册都会调用它，避免重复执行与重复日志
+        if self._cleaned:
+            return
+        self._cleaned = True
+
         # 等待健康检查线程退出（最多 3s）
         if hasattr(self, '_health_thread') and self._health_thread.is_alive():
             self._health_thread.join(timeout=3)

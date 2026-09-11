@@ -34,6 +34,16 @@ CLI_DISCOVERY_TIMEOUT = int(os.environ.get("SMARTBW_CLI_DISCOVERY_TIMEOUT", "10"
 # 模糊搜索
 FUZZY_THRESHOLD = float(os.environ.get("SMARTBW_FUZZY_THRESHOLD", "0.5"))
 
+# 项目缓存（长驻实例跨调用复用）
+# 后端多为个人自建 Vaultwarden，TTL 必须短：太长会出现"条目已更新但查到旧值"。
+CACHE_TTL = int(os.environ.get("SMARTBW_CACHE_TTL", "15"))
+# 无结果 / 结果可疑时触发强制刷新的最小间隔，避免一次查询白跑两遍、失败后连环重试
+CACHE_REFRESH_MIN_AGE = int(os.environ.get("SMARTBW_CACHE_REFRESH_MIN_AGE", "5"))
+# 最高分低于此值视为"结果可疑"，触发一次强制刷新重查。
+# 必须 > FUZZY_THRESHOLD：低于阈值的候选在评分阶段就被丢弃了，
+# 所以阈值等于 FUZZY_THRESHOLD 时这条分支永远不会触发（等于没用）。
+CACHE_SUSPICIOUS_SCORE = float(os.environ.get("SMARTBW_CACHE_SUSPICIOUS_SCORE", "0.6"))
+
 # 自动解锁
 AUTO_UNLOCK = os.environ.get("SMARTBW_AUTO_UNLOCK", "1") != "0"
 MAX_AUTO_UNLOCK_ATTEMPTS = int(os.environ.get("SMARTBW_MAX_UNLOCK_ATTEMPTS", "3"))
@@ -72,8 +82,20 @@ def _load_dotenv(dotenv_path: Path) -> None:
         pass
 
 
-def get_config() -> Dict[str, str]:
-    """获取配置,优先级:环境变量 > .env 文件 > config.json。缺失关键字段时不提供默认占位符。"""
+_config_cache: Dict[str, str] = None  # type: ignore[assignment]
+
+
+def get_config(refresh: bool = False) -> Dict[str, str]:
+    """获取配置,优先级:环境变量 > .env 文件 > config.json。缺失关键字段时不提供默认占位符。
+
+    进程内缓存：配置在进程生命周期内不变，而每次解析都要读文件、跑 crypto_config
+    （它会读写 config.json），且 MCP 路径自动发现会起 npm/which 子进程 —— 只应发生一次。
+    需要强制重读时传 refresh=True。
+    """
+    global _config_cache
+    if _config_cache is not None and not refresh:
+        return _config_cache
+
     config: Dict[str, str] = {}
     runtime_dir = _get_runtime_dir()
 
@@ -117,6 +139,7 @@ def get_config() -> Dict[str, str]:
     if not config.get("mcp_server_path"):
         config["mcp_server_path"] = _find_mcp_path()
 
+    _config_cache = config
     return config
 
 

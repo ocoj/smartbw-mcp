@@ -1,5 +1,52 @@
 # 变更日志
 
+## [2.3.1] - 2026-09-11
+
+### 🔧 Bug 修复
+
+- **D1 日志重复写入 + 轮转失效**: systemd 单元把 stdout/stderr `append` 到 `~/.smartbw-mcp/daemon.log`，与 `mcp_daemon.py` 内的 `TimedRotatingFileHandler` 抢写同一文件 —— 每行日志重复，且 systemd 持有旧 inode 使轮转失效。已移除 unit 中的重定向，日志统一由程序负责；`install.sh` 与 `docs/dev/install_openclaw.sh` 的 unit 生成、nohup 回退重定向同步修正
+- **D2 MCP 子进程生命周期竞态**: `MCPServerManager.start()/stop()` 未加锁，健康检查线程与请求线程并发调用会产生重复 spawn、或新进程刚启动就被误杀。新增 `_lifecycle_lock` 串行化 start/stop/restart，新增 `restart()` 使 stop+start 原子完成；`stop()` 末尾复位 `_initialized`
+- **D6 stdout 被污染**: `smart_search.search_items()` 中的 `print()` 会往 stdio JSON-RPC 流写入非 JSON 行（无结果查询时触发）。已改为 `logger`（stderr）
+- **O3 刷新门槛计时点错误**（真机实测发现）: 门槛按 `_last_attempt_time`（**尝试开始**时刻）计算，而单次装载约 5s、与门槛值同量级 —— 等装载返回时门槛早已到期，于是"刚装载完立刻无结果"又白拉一遍（多花约 5s）。改为取 `max(_cache_time, _last_attempt_time)`：成功装载按**完成**时刻计，失败尝试仍按开始时刻计（保留防重试风暴）。真机验证：同一场景后端拉取由 4 次降到 3 次
+- **D8 配置惰性加载失效**: `config.py` 的模块级 `__getattr__` 本意是"避免 import 时即执行 npm/which"，但 `mcp_raw.py` / `unlock.py` 在模块顶层 `from config import CONFIG` 会立刻触发 `get_config()` → `_find_mcp_path()`。全新安装（`mcp_server_path` 为空）实测 import 耗时 0.052s → **0.701s**，并真的起了 `npm ls -g @bitwarden/mcp-server` 与 `which bitwarden-mcp-server` 两个子进程（npm 卡住时最坏阻塞到 10s 超时）。修复：`get_config()` 增加进程内缓存（顺带收敛了此前每次调用都重跑一遍的 `crypto_config.process_config_on_startup()`），两个模块改为在函数内惰性取配置。修复后 import **0.029s / 0 子进程**
+- **双重 `cleanup()`**: `DaemonServer` 既 `atexit.register(self.cleanup)`，`_shutdown()` 里又调一次 `cleanup()`，退出时跑两遍 —— 日志重复打印「守护进程已停止」，且因健康检查线程 `join(timeout=3)` 不可中断，关闭耗时被拉长到 6s。修复：`cleanup()` 加幂等守卫。实测关闭日志 **2 行 → 1 行**，关闭耗时 **6s → 3s**
+
+### 🚀 缓存机制重做
+
+背景：此前每次工具调用都新建 `SmartBitwardenMCP` 实例且用完即弃，项目缓存活不过一次调用 —— 缓存参数形同虚设，每次查询都固定付出一次 `sync` + 一次全量 `list`（实测 ~4.9s）。重做后改为长驻实例 + 短 TTL 按需刷新。
+
+- **长驻缓存**: 实例在 MCP server 进程内常驻（socket 仍每次用完即关，连接保持新鲜），项目缓存得以跨调用复用
+- **按需刷新，无定时器**: TTL 15s（`SMARTBW_CACHE_TTL`）。命中直接读缓存；过期则**同步刷新后再回答**（保证本次数据最新）；无人查询时零流量
+- **三重刷新策略**: ① 过期重建前先 `sync`；② 无结果强制刷新重查；③ 最高分低于 `SMARTBW_CACHE_SUSPICIOUS_SCORE`（0.6）视为"结果可疑"，刷新后重查并取两次更优结果。②③ 受 `SMARTBW_CACHE_REFRESH_MIN_AGE`（5s）门槛约束，避免一次查询白跑两遍
+- **并发 single-flight**: 前台装载与异步刷新共用锁，保证同一时刻只有一次真正拉取
+- **启动预热**: MCP server 启动时后台预热缓存，首次查询无需等待全量装载
+- **缓存统计**: `smartbw_sync_cache` 返回值新增命中 / 重建 / 刷新计数
+- **`smartbw_sync_cache` 真正清缓存**: 原 Step 3 只有一行文案、没有任何代码；现真正调用 `clear_cache()` 并异步预热
+
+> 行为变更：移除了"🔍 正在刷新缓存后重试，请稍候…"提示（它是 stdout 污染源，与 stdio 协议冲突），刷新过程只记入日志。
+> 新增环境变量：`SMARTBW_CACHE_TTL`、`SMARTBW_CACHE_REFRESH_MIN_AGE`、`SMARTBW_CACHE_SUSPICIOUS_SCORE`。
+
+### 📝 文档对齐
+
+对照代码逐项核对了所有跟踪文档，补齐缺口、删除无效说明：
+
+- **README.md**: 配置参考表补全为代码实际支持的**全部**环境变量（含 3 个新增缓存参数、`BW_API_KEY`、`MCP_SERVER_PATH`、CLI 超时等，共 21 个）；核心特性补充"短 TTL 缓存"条目；修正"缓存双重检查锁"为"single-flight 锁"；`smartbw_sync_cache` 说明与实现对齐（含重启 MCP server）
+- **docs/architecture.md**: 新增「缓存与刷新」小节（命中/过期/无结果/可疑四种情况的行为、5s 门槛、single-flight、启动预热、无定时器）；模块表补上缓存策略与 `_fetch_items()`
+- **config.example.json / install.sh / install_openclaw.sh**: 删除 `connection_timeout_seconds` —— 该键**只写不读**，代码从未引用它（MCP 超时只认 `SMARTBW_MCP_TIMEOUT`）；两个安装脚本生成的 config.json 字段现与代码 schema 一致
+
+### 🧹 清理
+
+- **删除 `deploy/install.py`**（821 行遗留安装器，源自 v1 时代 `setup.py`）：生成 `session_file` / `search_settings` / `performance` 等旧 schema 键；把主密码**明文**写入 `.env`（与当前"主密码在 config.json 内 Fernet 加密"的设计冲突）；输出中引导用户 `from bw_for_weak_ai import …`（该模块已归档）。仓库内**零引用**（无文档、无代码、无脚本调用），能力已被 `install.sh` 覆盖 —— 后者还能装 systemd 服务
+- **`pyproject.toml`**: 覆盖率 omit 中的 `deploy/*` 一并移除
+
+### ✅ 测试
+
+- 新增 `tests/test_cache_behavior.py`：缓存策略**离线**回归 11 项 —— 命中复用、TTL 过期同步刷新、无结果 / 结果可疑重查、5s 门槛、single-flight、无定时器（空闲零流量）、不返回任意陈旧数据、stdout 洁净
+- 新增 `tests/test_cache_live.py`：**真机**集成 2 项 —— 后端拉取次数计数（命中/过期/空闲/门槛）、MCP server stdio 端到端（版本、工具数、stdout 洁净、`sync_cache` 输出）。带 `slow` + `network` 标记，需 `SMARTBW_LIVE_TEST=1` 显式启用，默认跳过
+- 新增 `tests/test_config_lazy_import.py`：import 期零子进程回归（子进程内探测）+ `get_config()` 进程内缓存
+- 新增 `tests/test_daemon_cleanup.py`：`cleanup()` 幂等（重复调用不重复停止子进程、日志只记一次）
+- 测试总量 26 项（24 通过 + 2 跳过）；`pytest tests/` 离线约 4s 完成
+
 ## [2.3.0] - 2026-07-30
 
 ### 🚀 公开发布准备
@@ -75,6 +122,8 @@
 - **根因**: daemon session 可长期保持 "unlocked" 状态，但期间新增的组织金库条目不被返回。`_ensure_cache()` 重建缓存时直接 `list_items`，拿到过期数据导致新条目搜索不到
 - **修复**: `_ensure_cache()` 缓存重建前调用 `bw sync`（调用 MCP `sync` tool）确保数据最新，失败静默降级
 - **影响**: 缓存 TTL 300s，sync 最多每 300s 触发一次，增量拉取开销可忽略
+
+> 注（2.3.1 补记）：`_ensure_cache()` 已在 2.3.1 的缓存重构中不复存在，其职责拆分为 `_fetch_items()`（先 `sync` 再全量 `list`）与 `_ensure_items()`（按 TTL 决定是否重建）。同时 TTL 由 300s 改为 **15s**，也不再是"每 300s 才 sync 一次"—— 过期即同步刷新，且无结果 / 结果可疑时会强制刷新重查（详见本文件 2.3.1 条目）。
 
 📄 `smart_search.py` — 1 文件
 

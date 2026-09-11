@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -127,16 +128,29 @@ TOOLS = [
 ]
 
 
-# === 每次新建 SmartBitwardenMCP 实例（UNIX socket 开销可忽略，确保数据新鲜） ===
+# === 长驻实例：项目缓存跨调用复用（TTL 见 config.CACHE_TTL） ===
+# 实例常驻是为了让缓存活下来；socket 仍每次用完即关（_get_client_ctx），
+# 因此连接始终新鲜，而项目缓存（默认 15s）得以复用，减少对 Vaultwarden 的 sync 次数。
+_client = None
+_client_lock = threading.Lock()
 _client_error_count = 0
 _client_last_error = 0.0
 
-def _get_client():
-    """每次创建新的 SmartBitwardenMCP 实例。
+def _create_client():
+    """新建并初始化一个 SmartBitwardenMCP（失败抛异常，由调用方分类处理）"""
+    c = SmartBitwardenMCP(use_daemon=True, timeout=30)
+    if not c.initialize():
+        raise Exception(
+            "[分类A·守护进程未运行] smartbw-daemon 守护进程未启动"
+        )
+    return c
 
-    熔断保护：连续 3 次失败后进入 30s 冷却。
+def _get_client():
+    """获取长驻 SmartBitwardenMCP 实例。
+
+    熔断保护：连续 5 次失败后进入 30s 冷却。
     """
-    global _client_error_count, _client_last_error
+    global _client, _client_error_count, _client_last_error
 
     now = time.time()
     if _client_error_count >= 5 and now - _client_last_error < 30:
@@ -147,14 +161,18 @@ def _get_client():
         )
 
     try:
-        c = SmartBitwardenMCP(use_daemon=True, timeout=30)
-        if not c.initialize():
-            raise Exception(
-                "[分类A·守护进程未运行] smartbw-daemon 守护进程未启动"
-            )
+        with _client_lock:
+            if _client is not None and _client.initialize():
+                c = _client
+            else:
+                # 实例不存在，或连接已不可用（如 daemon 重启）→ 丢弃旧实例重建
+                _client = None
+                c = _create_client()
+                _client = c
         _client_error_count = 0
         return c
     except Exception as e:
+        _client = None
         _client_error_count += 1
         _client_last_error = now
         err_str = str(e).lower()
@@ -195,7 +213,11 @@ def _get_client():
 
 @contextmanager
 def _get_client_ctx():
-    """上下文管理器：确保 SmartBitwardenMCP 实例使用后自动关闭 socket。"""
+    """上下文管理器：用完只关 socket，不销毁实例。
+
+    实例必须常驻，项目缓存才能跨调用复用（TTL 见 config.CACHE_TTL）；
+    RealMCPClient.close() 会把 initialized 置 False，下次 initialize() 自动重连。
+    """
     smart = None
     try:
         smart = _get_client()
@@ -203,7 +225,7 @@ def _get_client_ctx():
     finally:
         if smart is not None:
             try:
-                smart.close()
+                smart.client.close()
             except Exception:
                 pass
 
@@ -214,7 +236,7 @@ def _handle_init(_id, _params):
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.0"}
+        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.1"}
     }
 
 
@@ -501,13 +523,25 @@ def _handle_tools_call(_id, params):
                         except Exception:
                             pass
 
-            # Step 3: clear internal Python cache
+            # Step 3: 清除长驻实例的项目缓存，并后台预先重建
+            cache_msg = ""
+            stats_msg = ""
+            try:
+                smart = _get_client()
+                smart.clear_cache()
+                smart.refresh_async()  # 后台重建，下次查询无需等待全量装载
+                cache_msg = "MCP Python 缓存已清除"
+                stats_msg = smart.refresh_stats()
+            except Exception as e:
+                cache_msg = f"⚠️ 缓存清除失败: {e}"
 
             lines = [
                 f"bw sync: {'✅ ' + sync_msg if sync_ok else '❌ ' + sync_msg}",
                 daemon_msg,
-                "MCP Python 缓存已清除"
+                cache_msg,
             ]
+            if stats_msg:
+                lines.append(f"缓存统计: {stats_msg}")
             return _text_result("\n".join(lines), is_error=not sync_ok)
         except Exception as e:
             logger.exception(f"smartbw_sync_cache 处理异常: {e}")
@@ -523,7 +557,24 @@ def _text_result(text: str, is_error: bool = False) -> dict:
     }
 
 
+def _prewarm_cache():
+    """O5：启动时后台预热缓存，避免首次查询等一次全量装载（~5s）。
+
+    失败不致命（daemon 可能尚未就绪），首次查询会自行冷启动。
+    """
+    def worker():
+        try:
+            smart = _get_client()
+            smart.warm_up()
+            logger.info(f"[prewarm] 缓存预热完成 | {smart.refresh_stats()}")
+        except Exception as e:
+            logger.warning(f"[prewarm] 缓存预热失败（不影响使用）: {e}")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def main():
+    _prewarm_cache()
     for line in sys.stdin:
         line = line.strip()
         if not line:

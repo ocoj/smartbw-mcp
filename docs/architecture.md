@@ -8,7 +8,7 @@
 │ stdio JSON-RPC, 8 个工具, 优雅升级              │
 ├─────────────────────────────────────────────────┤
 │ smart_search.py          智能搜索层              │
-│ 6 策略模糊搜索, 索引加速, 缓存 (TTL 30s)        │
+│ 6 策略模糊搜索, 索引加速, 缓存 (TTL 15s)        │
 ├─────────────────────────────────────────────────┤
 │ mcp_raw.py               通信层                  │
 │ JSON-RPC, 熔断器 (5次/30s), CRUD 操作           │
@@ -83,12 +83,31 @@ Vaultwarden 服务器          → 密码存储
 
 配合名称索引：精确/前缀匹配 O(1)。
 
+### 缓存与刷新
+
+项目列表常驻内存：`SmartBitwardenMCP` 实例在 MCP server 进程内长驻（socket 仍每次用完即关），
+TTL 15 秒（`SMARTBW_CACHE_TTL`）。**没有任何定时器** —— 只有查询进来时才会比对缓存年龄：
+
+| 情况 | 行为 |
+|------|------|
+| 命中（年龄 ≤ TTL） | 直接读缓存，0 次后端请求 |
+| 过期（年龄 > TTL） | 同步刷新后再回答，保证本次数据最新 |
+| 查询无结果 | 强制刷新后重查一次 |
+| 最高分 < `SMARTBW_CACHE_SUSPICIOUS_SCORE`（0.6） | 视为"结果可疑"，刷新后重查并取两次更优的结果 |
+| 无人查询 | 不做任何事，零流量 |
+
+- 一次刷新 = `sync`（唯一的服务器请求）+ 全量 `list`（本地解密，约 3.3s 固定开销，与是否带 search 过滤无关）
+- 后两种"补救式刷新"受 `SMARTBW_CACHE_REFRESH_MIN_AGE`（5s）约束：距上次装载太近则跳过，避免一次查询白跑两遍
+- 前台装载与异步刷新共用 `_load_lock`（single-flight），并发查询只实际拉取一次
+- MCP server 启动时后台预热一次，首次查询无需等待全量装载
+- 命中 / 重建 / 刷新计数可通过 `smartbw_sync_cache` 的返回值查看
+
 ## 模块列表
 
 | 模块 | 职责 | 核心类/函数 |
 |------|------|-------------|
 | `smartbw_mcp_server.py` | MCP 工具注册 + 请求分发 | `_get_client_ctx()`, `_resolve_search()` |
-| `smart_search.py` | 智能模糊搜索 + 缓存 | `SmartBitwardenMCP`, `_fuzzy_score()` |
+| `smart_search.py` | 智能模糊搜索 + 长驻缓存/刷新策略 | `SmartBitwardenMCP`, `_fuzzy_score()`, `_fetch_items()` |
 | `mcp_raw.py` | JSON-RPC 通信 + 熔断 | `RealMCPClient`, `_with_circuit()` |
 | `mcp_daemon.py` | Unix Socket + 子进程管理 | `DaemonServer`, `MCPServerManager` |
 | `unlock.py` | bw CLI 自动登录/解锁 | `auto_unlock()` |

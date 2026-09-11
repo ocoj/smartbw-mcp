@@ -14,7 +14,7 @@ import subprocess
 import logging
 from typing import Optional
 
-from config import CONFIG, AUTO_UNLOCK, CLI_STATUS_TIMEOUT, CLI_LOGIN_TIMEOUT, CLI_UNLOCK_TIMEOUT, logger
+from config import AUTO_UNLOCK, CLI_STATUS_TIMEOUT, CLI_LOGIN_TIMEOUT, CLI_UNLOCK_TIMEOUT, get_config, logger
 
 # ============================================================================
 # 自动解锁
@@ -33,7 +33,7 @@ def auto_unlock() -> Optional[str]:
     # 获取主密码
     master_password = os.environ.get("BW_MASTER_PASSWORD")
     if not master_password:
-        master_password = CONFIG.get("master_password")
+        master_password = get_config().get("master_password")
     if not master_password:
         logger.warning("未配置 BW_MASTER_PASSWORD,无法自动解锁")
         return None
@@ -41,7 +41,7 @@ def auto_unlock() -> Optional[str]:
     try:
         logger.info("尝试自动解锁...")
 
-        bw_host = CONFIG.get("bw_host", "https://your-vaultwarden-server.com")
+        bw_host = get_config().get("bw_host", "https://your-vaultwarden-server.com")
         unlock_env = _prepare_env(bw_host, master_password)
 
         if not _ensure_logged_in(unlock_env):
@@ -136,12 +136,12 @@ def _try_api_key_login(env: dict) -> bool:
 
 def _try_password_login(env: dict) -> bool:
     """尝试使用用户名密码登录"""
-    email = os.environ.get("BW_EMAIL") or CONFIG.get("email", "")
+    email = os.environ.get("BW_EMAIL") or get_config().get("email", "")
     if not email:
         logger.warning("未配置 BW_EMAIL，无法使用用户名密码登录")
         return False
 
-    master_password = os.environ.get("BW_MASTER_PASSWORD") or CONFIG.get("master_password", "")
+    master_password = os.environ.get("BW_MASTER_PASSWORD") or get_config().get("master_password", "")
     if not master_password:
         logger.warning("未配置 BW_MASTER_PASSWORD，无法登录")
         return False
@@ -167,12 +167,12 @@ def _try_password_login(env: dict) -> bool:
 
 def _get_api_credentials() -> tuple:
     """获取 API Key 凭证 (client_id, client_secret)"""
-    client_id = os.environ.get("BW_CLIENTID") or CONFIG.get("client_id", "")
-    client_secret = os.environ.get("BW_CLIENTSECRET") or CONFIG.get("client_secret", "")
+    client_id = os.environ.get("BW_CLIENTID") or get_config().get("client_id", "")
+    client_secret = os.environ.get("BW_CLIENTSECRET") or get_config().get("client_secret", "")
 
     # 尝试从 BW_API_KEY 解析
     if not client_id or not client_secret:
-        api_key = os.environ.get("BW_API_KEY") or CONFIG.get("api_key", "")
+        api_key = os.environ.get("BW_API_KEY") or get_config().get("api_key", "")
         if api_key:
             if api_key.startswith("user."):
                 parts = api_key.split(".")
