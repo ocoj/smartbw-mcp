@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 # 占位符模板：本文件不能直接使用，需由安装脚本渲染 __PYTHON__ / __SCRIPT_DIR__ 后
-# 写入 ~/.config/systemd/user/。install.sh 会自行生成单元文件；install_openclaw.sh
-# 会对本文件做 sed 渲染。切勿在此填写个人绝对路径（对他人必然不存在）。
+# 写入 ~/.config/systemd/user/。install.sh 会自行生成单元文件；另有内部安装脚本
+# 会对本文件做 sed 渲染（该脚本不随仓库发布）。切勿在此填写个人绝对路径（对他人必然不存在）。
 ExecStart=__PYTHON__ __SCRIPT_DIR__/mcp_daemon.py
 Restart=always
 RestartSec=10

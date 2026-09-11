@@ -2,7 +2,7 @@
 
 ## [2.3.3] - 2026-09-11
 
-> 依据第三方复核报告 `docs/dev/AUDIT_REVIEW_v2.3.2.md`（复核对象 v2.3.2 / `eb94fd1`）的收尾修复。
+> 依据第三方复核报告的收尾修复（复核报告为内部文档 `docs/dev/AUDIT_REVIEW_v2.3.2.md`，不随仓库发布）。
 
 ### 🔧 修复
 
@@ -21,7 +21,7 @@
 
 ## [2.3.2] - 2026-09-11
 
-> 依据 v2.3.1 第三方审计报告（`docs/dev/AUDIT_REPORT_v2.3.1.md`，R3）的修复提交。
+> 依据 v2.3.1 第三方审计报告的修复提交（审计报告为内部文档 `docs/dev/AUDIT_REPORT_v2.3.1.md`，不随仓库发布）。
 > 真机复核：对运行中的 daemon + 自建 Vaultwarden 跑通 `SMARTBW_LIVE_TEST=1 pytest tests/test_cache_live.py`。
 
 ### 🔴 P0
