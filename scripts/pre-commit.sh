@@ -49,7 +49,7 @@ echo -e "${GREEN}✅ 配置安全检查通过${NC}"
 #   - 命中时只打印「文件:行号」，**绝不打印匹配内容本身**
 #   - 用白名单放行占位域与公共域，避免误报
 # ============================================================
-ALLOWED='example\.(com|org|net)|your[-_]|yourserver|vault\.example|vaultwarden\.example|localhost|127\.0\.0\.1|0\.0\.0\.0|bitwarden\.com|bitwarden\.net|github\.com|githubusercontent\.com|python\.org|pypi\.org|npmjs\.com|nodejs\.org|keepachangelog\.com|semver\.org|shields\.io|opensource\.org|ubuntu\.com|debian\.org|centos\.org|redhat\.com|systemd\.io|specifications\.freedesktop\.org|modelcontextprotocol\.io'
+ALLOWED='example\.(com|org|net)|\.invalid|\.test|your[-_]|yourserver|vault\.example|vaultwarden\.example|localhost|127\.0\.0\.1|0\.0\.0\.0|bitwarden\.com|bitwarden\.net|github\.com|githubusercontent\.com|python\.org|pypi\.org|npmjs\.com|nodejs\.org|keepachangelog\.com|semver\.org|shields\.io|opensource\.org|ubuntu\.com|debian\.org|centos\.org|redhat\.com|systemd\.io|specifications\.freedesktop\.org|modelcontextprotocol\.io'
 
 CONTENT_FAILED=0
 

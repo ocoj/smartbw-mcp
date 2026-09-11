@@ -1,5 +1,24 @@
 # 变更日志
 
+## [2.3.8] - 2026-09-11
+
+> 依据第三方复核报告遗留项：**工具层补测与覆盖率门槛**。`smartbw_mcp_server.py` 是所有工具调用的入口层，此前覆盖率仅 **16%**（8 个工具的分支基本未测）。
+
+### 🧪 测试
+
+- 新增 `tests/test_server_tools.py`（**63 项**），覆盖：
+  - **8 个工具的 handler 分支**：`get_api`（命中/大小写/无 API 字段时列出可用字段/多结果选项/未找到/异常）、`get_field`（password·username·uri·notes 及别名 + 自定义字段 + 字段不存在时列出标准与自定义可用字段 + 缺参数）、`get_item`、`get_password`（有/无密码）、`search`（无 query/无结果/格式化/limit 夹取）、`list_all`（空/截断提示/未截断）、`daemon_status`（运行中/陈旧 PID/未运行）、`sync_cache`（成功清理缓存 + 同步失败仍清本地缓存并置 isError）
+  - **协议层**：`initialize`、`tools/list`（8 工具齐全）、`_text_result` 结构
+  - **辅助函数**：`_int_arg` 夹取与非法回退（参数化 7 例）、`_item_to_info`、`_available_fields`
+  - **`_get_client`**：熔断窗口内拒绝、冷却后重试、A/B/C/未知 四类错误分类（参数化 7 例）、失败计数累加、健康实例复用、`_get_client_ctx` 只关 socket 不销毁实例（含异常路径）
+  - **`main()` stdio 主循环**：空行/非法 JSON/`notifications/initialized` 均不产生响应、`tools/call` 正常回包、未知方法返回 isError
+- 全程使用 FakeSmart 替身：**不启动 daemon、不依赖 Vaultwarden、无子进程调用**，可在任意环境离线运行
+- 覆盖率：`smartbw_mcp_server.py` **16% → 80%**；项目总计 **36% → 47%**；测试数 59 → **122**
+
+### 🔧 工程
+
+- CI 覆盖率门槛 `--cov-fail-under` **30 → 40**（当前 47%，留 7 点缓冲），防止入口层覆盖率回落
+
 ## [2.3.7] - 2026-09-11
 
 > 依据第三方复核报告（内部文档）F-2 项：2.3.6 新增的 socket 存活探测存在**异常分类过粗**的盲点。
