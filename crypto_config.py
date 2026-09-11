@@ -24,7 +24,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from paths import config_path, env_path, is_default_runtime_dir
+from paths import config_path, env_path, is_default_runtime_dir, state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 # api_key 是 "user.<clientId>.<clientSecret>" 单字段形式，内含 clientSecret，必须一并保护。
 SENSITIVE_KEYS = ["master_password", "client_secret", "api_key"]
 ENCRYPTED_PREFIX = "!enc:v1:"
-REINIT_FILE = Path.home() / ".smartbw-mcp" / "NEEDS_REINIT"
+# 标记位于**运行状态目录**（~/.smartbw-mcp/），不属于配置目录 —— 不受 SMARTBW_CONFIG_DIR 影响。
+# 与 socket / pid / log 共用 paths.state_dir()，避免同一路径散落多份硬编码。
+REINIT_FILE = state_dir() / "NEEDS_REINIT"
 
 
 def __getattr__(name):

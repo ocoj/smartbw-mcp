@@ -36,3 +36,34 @@ def env_path() -> Path:
 def is_default_runtime_dir() -> bool:
     """当前解析出的运行时目录是否就是默认目录（即未通过 SMARTBW_CONFIG_DIR 自定义）。"""
     return runtime_dir() == Path.home() / DEFAULT_RUNTIME_SUBDIR
+
+
+DEFAULT_STATE_SUBDIR = Path(".smartbw-mcp")
+
+
+def state_dir() -> Path:
+    """**运行状态目录** —— 放 socket / pid / log / `NEEDS_REINIT` 标记。
+
+    与 `runtime_dir()`（配置目录）是两回事：本目录一律为 `~/.smartbw-mcp/`，
+    **不受 `SMARTBW_CONFIG_DIR` 影响**。测试要隔离它只能重定向 `HOME`
+    （或只覆盖 socket，见 `socket_path()`）。
+
+    历史上各模块各自硬编码 `Path.home() / ".smartbw-mcp"`，同一路径存在 4 处副本，
+    与 P0-2（配置目录重复）同类的"多份真相"问题，故一并收归此处。
+    """
+    return Path.home() / DEFAULT_STATE_SUBDIR
+
+
+def socket_path() -> Path:
+    """daemon 的 Unix socket 路径。
+
+    默认 `<state_dir>/daemon.sock`；可由 `SMARTBW_SOCKET_PATH` 单独覆盖。
+
+    用途：真机集成测试需要"隔离 `HOME`（不污染真实运行目录）**同时**连上真实
+    daemon" —— 二者曾互斥（见下）。有了本覆盖项，测试可只把 socket 指回真实路径，
+    而不必放弃 `HOME` 隔离。
+    """
+    custom = os.environ.get("SMARTBW_SOCKET_PATH", "").strip()
+    if custom:
+        return Path(custom).expanduser()
+    return state_dir() / "daemon.sock"

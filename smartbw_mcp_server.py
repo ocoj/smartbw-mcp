@@ -23,7 +23,8 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from pathlib import Path
+
+from paths import socket_path, state_dir
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -38,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger("smartbw_mcp_server")
 
 # 优雅退出信号文件 — 部署脚本 touch 此文件后，MCP server 处理完下一个请求即退出
-SHUTDOWN_SIGNAL = Path.home() / ".smartbw-mcp" / "restart.signal"
+SHUTDOWN_SIGNAL = state_dir() / "restart.signal"
 
 # 提前导入（避免每次请求重复 import）。
 # noqa: E402 —— 必须在 sys.path.insert 之后导入，属有意为之。
@@ -248,7 +249,7 @@ def _handle_init(_id, _params):
     return {
         "protocolVersion": "2024-11-05",
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.3"}
+        "serverInfo": {"name": "smartbw-mcp", "version": "2.3.4"}
     }
 
 
@@ -487,8 +488,8 @@ def _handle_tools_call(_id, params):
 
     # ── smartbw_daemon_status ──
     elif name == "smartbw_daemon_status":
-        pid_file = Path.home() / ".smartbw-mcp" / "daemon.pid"
-        sock = Path.home() / ".smartbw-mcp" / "daemon.sock"
+        pid_file = state_dir() / "daemon.pid"
+        sock = socket_path()
         if pid_file.exists() and sock.exists():
             pid = pid_file.read_text().strip()
             try:
@@ -520,7 +521,7 @@ def _handle_tools_call(_id, params):
 
             # Step 2: restart daemon's node MCP server
             daemon_msg = ""
-            sock_path = Path.home() / ".smartbw-mcp" / "daemon.sock"
+            sock_path = socket_path()
             if sock_path.exists():
                 sock = None
                 try:

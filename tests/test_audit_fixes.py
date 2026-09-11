@@ -308,11 +308,51 @@ def test_reinit_marker_under_isolated_home():
 
     （曾因只隔离 SMARTBW_CONFIG_DIR 而漏掉运行目录，导致本套用例把 NEEDS_REINIT
     写进了用户真实环境。）
+
+    注意：**真机模式（SMARTBW_LIVE_TEST=1）也必须成立** —— 此前该模式下整体不隔离、
+    且本用例自行 skip，等于保护与守护同时失效。现在只把 socket 指回真实路径，
+    HOME 仍然隔离，故本断言无条件执行。
     """
-    if os.environ.get("SMARTBW_LIVE_TEST"):
-        pytest.skip("真机模式不做 HOME 隔离")
     import crypto_config
     assert "smartbw-test-home-" in str(crypto_config.REINIT_FILE)
+
+
+def test_socket_path_default_and_override(monkeypatch):
+    """socket 路径的单一来源：默认落在运行状态目录，`SMARTBW_SOCKET_PATH` 可覆盖。"""
+    import paths
+
+    monkeypatch.delenv("SMARTBW_SOCKET_PATH", raising=False)
+    assert paths.socket_path() == paths.state_dir() / "daemon.sock"
+
+    monkeypatch.setenv("SMARTBW_SOCKET_PATH", "~/real/daemon.sock")
+    assert paths.socket_path() == Path("~/real/daemon.sock").expanduser()
+    # 覆盖 socket 不得影响运行状态目录本身（仅放行这一个路径）
+    assert paths.state_dir() == Path.home() / ".smartbw-mcp"
+
+
+def test_state_dir_is_independent_of_config_dir(monkeypatch, tmp_path):
+    """配置目录与运行状态目录是两个概念：改 SMARTBW_CONFIG_DIR 不得移动运行目录。"""
+    import paths
+
+    # 真机模式下 conftest 会设置 socket 覆盖，这里只测"默认推导"，故先清掉
+    monkeypatch.delenv("SMARTBW_SOCKET_PATH", raising=False)
+    before = paths.state_dir()
+    monkeypatch.setenv("SMARTBW_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert paths.runtime_dir() == tmp_path / "cfg"
+    assert paths.state_dir() == before
+    assert paths.socket_path() == before / "daemon.sock"
+
+
+def test_daemon_module_paths_share_one_source():
+    """daemon / server 的运行状态路径必须同源于 paths（曾各自硬编码，共 5 处）。"""
+    import mcp_daemon
+    import paths
+    import smartbw_mcp_server
+
+    assert mcp_daemon.SOCKET_PATH == paths.socket_path()
+    assert mcp_daemon.PID_FILE.parent == paths.state_dir()
+    assert mcp_daemon.LOG_FILE.parent == paths.state_dir()
+    assert smartbw_mcp_server.SHUTDOWN_SIGNAL.parent == paths.state_dir()
 
 
 def test_reinit_marker_not_deleted_for_other_config_dir(monkeypatch, tmp_path):

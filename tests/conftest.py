@@ -12,16 +12,27 @@
 因此这里同时重定向 `HOME` 与 `SMARTBW_CONFIG_DIR` 到临时目录。
 个别测试用 monkeypatch 覆盖是在测试内生效，属于测试自己的事。
 
-例外：显式设置 `SMARTBW_LIVE_TEST=1` 时**不做隔离** —— 真机集成测试
-（`tests/test_cache_live.py`）需要连真实 daemon 与 Vaultwarden，隔离后只会被 skip。
+真机模式（`SMARTBW_LIVE_TEST=1`）**同样隔离**，只把 daemon socket 指回真实运行目录
+（`SMARTBW_SOCKET_PATH`）—— 这样"不污染真实环境"与"能连真实 daemon"不再互斥。
+此前二者互斥，导致真机模式下**全部**用例失去隔离，且守护真实环境的
+`test_reinit_marker_under_isolated_home` 恰好自行 skip（保护同时失效）。
 """
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-if not os.environ.get("SMARTBW_LIVE_TEST"):
-    _ISOLATED_HOME = tempfile.mkdtemp(prefix="smartbw-test-home-")
-    os.environ["HOME"] = _ISOLATED_HOME                  # 隔离 ~/.smartbw-mcp 与 Path.home()
-    os.environ["SMARTBW_CONFIG_DIR"] = os.path.join(_ISOLATED_HOME, ".config", "bitwarden-mcp")
+# 必须在改写 HOME 之前取到真实家目录，否则下面拿不到原值
+_REAL_HOME = Path.home()
+
+_ISOLATED_HOME = tempfile.mkdtemp(prefix="smartbw-test-home-")
+os.environ["HOME"] = _ISOLATED_HOME                  # 隔离 ~/.smartbw-mcp 与 Path.home()
+os.environ["SMARTBW_CONFIG_DIR"] = os.path.join(_ISOLATED_HOME, ".config", "bitwarden-mcp")
+
+if os.environ.get("SMARTBW_LIVE_TEST"):
+    # 真机用例要连真实 daemon，但只放行 socket 这一个路径，其余仍隔离。
+    os.environ.setdefault(
+        "SMARTBW_SOCKET_PATH", str(_REAL_HOME / ".smartbw-mcp" / "daemon.sock"))
+

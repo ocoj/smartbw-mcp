@@ -18,6 +18,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import paths  # noqa: E402  （需在 sys.path 注入之后导入）
+
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.network,
@@ -27,7 +29,7 @@ pytestmark = [
     ),
 ]
 
-SOCKET = Path.home() / ".smartbw-mcp" / "daemon.sock"
+SOCKET = paths.socket_path()
 
 
 def _require_daemon():

@@ -36,6 +36,8 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
 
+from paths import socket_path, state_dir
+
 # 导入自定义异常（与 mcp_raw.py 使用的类型一致）。
 # 切勿用内置名 TimeoutError / ConnectionError 作别名 —— 那会遮蔽内置异常，
 # 让 `except ConnectionError` 漏捕 OSError 子类。
@@ -48,9 +50,11 @@ except ImportError:  # pragma: no cover - models.py 与本模块同目录，正�
     MCPConnectionError = ConnectionError
 
 # === 配置 ===
-SOCKET_PATH = Path.home() / ".smartbw-mcp" / "daemon.sock"
-PID_FILE = Path.home() / ".smartbw-mcp" / "daemon.pid"
-LOG_FILE = Path.home() / ".smartbw-mcp" / "daemon.log"
+# 运行状态路径统一由 paths.py 解析（socket 另支持 SMARTBW_SOCKET_PATH 覆盖，
+# 供"隔离 HOME 但连真实 daemon"的真机测试使用）。
+SOCKET_PATH = socket_path()
+PID_FILE = state_dir() / "daemon.pid"
+LOG_FILE = state_dir() / "daemon.log"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

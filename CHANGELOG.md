@@ -1,5 +1,21 @@
 # 变更日志
 
+## [2.3.4] - 2026-09-11
+
+> 依据第三方复核报告（内部文档）D-4 项：真机测试模式与测试环境隔离**互斥**的问题。
+
+### 🔧 修复
+
+- **`SMARTBW_LIVE_TEST=1` 时测试隔离整体失效（复核 D-3/R-3.2、D-4）**: 此前 conftest 在该模式下**完全不做隔离**，`HOME` 与 `SMARTBW_CONFIG_DIR` 都指向真实用户目录 ⇒ 一次真机全量测试就可能把 `NEEDS_REINIT` 等运行时产物写进用户真实环境；更糟的是守护这一点的 `test_reinit_marker_under_isolated_home` 在该模式下**自行 skip**，保护与守护同时失效（已实测复现：探针 `HOME` 下出现 `.smartbw-mcp/`）。
+  现在**两种模式一律隔离**，真机用例只通过新增的 `SMARTBW_SOCKET_PATH` 把 socket 指回真实运行目录，其余路径仍被隔离；同时删除该用例的 skip 分支，使其在真机模式下也真正执行
+- **运行状态路径收敛为单一来源**: `~/.smartbw-mcp/`（socket / pid / log / `NEEDS_REINIT` / `restart.signal`）此前在 `mcp_daemon.py`、`smartbw_mcp_server.py`（3 处）、`test_cache_live.py` 共 **5 处**各自硬编码，与 P0-2（配置目录多份真相）同类。现统一收敛到 `paths.state_dir()` / `paths.socket_path()`
+- 新增 `SMARTBW_SOCKET_PATH` 环境变量（默认 `~/.smartbw-mcp/daemon.sock`，支持 `~`），README 配置表同步
+
+### 🧪 测试
+
+- 新增 `test_socket_path_default_and_override`、`test_state_dir_is_independent_of_config_dir`、`test_daemon_module_paths_share_one_source`；`test_reinit_marker_under_isolated_home` 改为无条件断言
+- 真机验证：`SMARTBW_LIVE_TEST=1 pytest tests/` 在**隔离开启**的前提下 live 用例通过，且探针/真实环境均未被写入
+
 ## [2.3.3] - 2026-09-11
 
 > 依据第三方复核报告的收尾修复（复核报告为内部文档 `docs/dev/AUDIT_REVIEW_v2.3.2.md`，不随仓库发布）。
